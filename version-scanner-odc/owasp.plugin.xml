@@ -1,0 +1,74 @@
+ <plugin>
+                <groupId>org.owasp</groupId>
+                <artifactId>dependency-check-maven</artifactId>
+                <version>12.1.9</version>
+                <configuration>
+
+                    <dataDirectory>/usr/share/dependency-check/data</dataDirectory>
+
+                    <!-- Suppression file for false positives -->
+                    <suppressionFiles>
+                        <suppressionFile>/scanner/suppression.xml</suppressionFile>
+                    </suppressionFiles>
+
+                    <!-- Offline mode - do not connect to the internet, do not update the DB -->
+                    <autoUpdate>false</autoUpdate>
+
+                    <!-- NVD API will not be used (offline) -->
+                    <nvdApiKey>121c0461-73b3-4584-85bb-623db749f04b</nvdApiKey>
+
+
+                    <formats>
+                        <format>HTML</format>
+                        <format>JSON</format>
+                        <format>XML</format>
+                    </formats>
+
+
+                    <outputDirectory>${project.build.directory}/dependency-check-report</outputDirectory>
+
+
+                    <verbose>true</verbose>
+
+                    <skipPnpmAudit>true</skipPnpmAudit>
+
+                    <!-- Analyzers: Only those required for Java are active, others are disabled -->
+                    <assemblyAnalyzerEnabled>false</assemblyAnalyzerEnabled>
+
+                    <!-- Node.js analyzers (pnpm, npm, yarn) - DISABLED -->
+                    <nodeAnalyzerEnabled>false</nodeAnalyzerEnabled>
+                    <nodeAuditAnalyzerEnabled>false</nodeAuditAnalyzerEnabled>
+                    <pnpmAuditAnalyzerEnabled>false</pnpmAuditAnalyzerEnabled>
+                    <yarnAuditAnalyzerEnabled>false</yarnAuditAnalyzerEnabled>
+                    <retireJsAnalyzerEnabled>false</retireJsAnalyzerEnabled>
+
+                    <!-- .NET analyzers - DISABLED -->
+                    <msbuildAnalyzerEnabled>false</msbuildAnalyzerEnabled>
+                    <nuspecAnalyzerEnabled>false</nuspecAnalyzerEnabled>
+                    <nugetconfAnalyzerEnabled>false</nugetconfAnalyzerEnabled>
+
+                    <!-- Ruby analyzers - DISABLED -->
+                    <bundleAuditAnalyzerEnabled>false</bundleAuditAnalyzerEnabled>
+                    <rubygemsAnalyzerEnabled>false</rubygemsAnalyzerEnabled>
+
+                    <!-- Go analyzers - DISABLED -->
+                    <golangDepEnabled>false</golangDepEnabled>
+                    <golangModEnabled>false</golangModEnabled>
+
+                    <!-- iOS/Swift analyzers - DISABLED -->
+                    <cocoapodsAnalyzerEnabled>false</cocoapodsAnalyzerEnabled>
+                    <swiftPackageManagerAnalyzerEnabled>false</swiftPackageManagerAnalyzerEnabled>
+
+                    <!-- Python analyzers - DISABLED -->
+                    <pipAnalyzerEnabled>false</pipAnalyzerEnabled>
+                    <pipfileAnalyzerEnabled>false</pipfileAnalyzerEnabled>
+                    <poetryAnalyzerEnabled>false</poetryAnalyzerEnabled>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+ </plugin>

@@ -1,0 +1,78 @@
+<?xml version='1.0' encoding='utf-8'?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>vulnerable-app</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>Vulnerable Application Example</name>
+    <description>Example project with known vulnerabilities for testing</description>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            <version>3.2.0</version>
+        </dependency>
+        <!--
+        <dependency>
+            <groupId>org.apache.tomcat.embed</groupId>
+            <artifactId>tomcat-embed-core</artifactId>
+            <version>11.0.12</version>
+        </dependency>
+
+        -->
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.owasp</groupId>
+                <artifactId>dependency-check-maven</artifactId>
+                <version>12.1.9</version>
+                <configuration>
+
+                    <dataDirectory>/usr/share/dependency-check/data</dataDirectory>
+
+                    <!-- Offline mode - do not connect to the internet, do not update the DB -->
+                    <autoUpdate>false</autoUpdate>
+
+                    <!-- NVD API will not be used (offline) -->
+                    <nvdApiKey>121c0461-73b3-4584-85bb-623db749f04b</nvdApiKey>
+
+
+                    <formats>
+                        <format>HTML</format>
+                        <format>JSON</format>
+                        <format>XML</format>
+                    </formats>
+
+
+                    <outputDirectory>${project.build.directory}/dependency-check-report</outputDirectory>
+
+
+                    <verbose>true</verbose>
+
+
+                    <assemblyAnalyzerEnabled>false</assemblyAnalyzerEnabled>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

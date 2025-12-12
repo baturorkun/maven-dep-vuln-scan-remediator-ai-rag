@@ -1,0 +1,20 @@
+# MCP (Model Context Protocol)
+fastmcp>=2.0.0
+mcp>=1.0.0
+
+# HTTP client for LLM APIs
+httpx>=0.25.0
+
+# Neo4j database driver
+neo4j>=5.0.0
+
+# Visualization libraries (for tools)
+matplotlib>=3.7.0
+networkx>=3.1
+
+# HTTP requests for CVE enrichment
+requests>=2.31.0
+
+# Web dashboard
+streamlit>=1.28.0
+pandas>=2.0.0

@@ -1,0 +1,88 @@
+<?xml version='1.0' encoding='utf-8'?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0          http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>vulnerable-java-project</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>Vulnerable Java Project - Parent</name>
+    <description>Test projesi - Güvenlik zafiyet taraması için</description>
+
+    <modules>
+        <module>module1</module>
+        <module>module2</module>
+        <module>module3</module>
+    </modules>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+<build><plugins>
+<plugin><groupId>org.owasp</groupId><artifactId>dependency-check-maven</artifactId><version>12.1.9</version><configuration>
+
+                    <dataDirectory>/usr/share/dependency-check/data</dataDirectory>
+
+                    
+                    <autoUpdate>false</autoUpdate>
+
+                    
+                    <nvdApiKey>121c0461-73b3-4584-85bb-623db749f04b</nvdApiKey>
+
+
+                    <formats>
+                        <format>HTML</format>
+                        <format>JSON</format>
+                        <format>XML</format>
+                    </formats>
+
+
+                    <outputDirectory>${project.build.directory}/dependency-check-report</outputDirectory>
+
+
+                    <verbose>true</verbose>
+
+                    <skipPnpmAudit>true</skipPnpmAudit>
+
+                    
+                    <assemblyAnalyzerEnabled>false</assemblyAnalyzerEnabled>
+
+                    
+                    <nodeAnalyzerEnabled>false</nodeAnalyzerEnabled>
+                    <nodeAuditAnalyzerEnabled>false</nodeAuditAnalyzerEnabled>
+                    <pnpmAuditAnalyzerEnabled>false</pnpmAuditAnalyzerEnabled>
+                    <yarnAuditAnalyzerEnabled>false</yarnAuditAnalyzerEnabled>
+                    <retireJsAnalyzerEnabled>false</retireJsAnalyzerEnabled>
+
+                    
+                    <msbuildAnalyzerEnabled>false</msbuildAnalyzerEnabled>
+                    <nuspecAnalyzerEnabled>false</nuspecAnalyzerEnabled>
+                    <nugetconfAnalyzerEnabled>false</nugetconfAnalyzerEnabled>
+
+                    
+                    <bundleAuditAnalyzerEnabled>false</bundleAuditAnalyzerEnabled>
+                    <rubygemsAnalyzerEnabled>false</rubygemsAnalyzerEnabled>
+
+                    
+                    <golangDepEnabled>false</golangDepEnabled>
+                    <golangModEnabled>false</golangModEnabled>
+
+                    
+                    <cocoapodsAnalyzerEnabled>false</cocoapodsAnalyzerEnabled>
+                    <swiftPackageManagerAnalyzerEnabled>false</swiftPackageManagerAnalyzerEnabled>
+
+                    
+                    <pipAnalyzerEnabled>false</pipAnalyzerEnabled>
+                    <pipfileAnalyzerEnabled>false</pipfileAnalyzerEnabled>
+                    <poetryAnalyzerEnabled>false</poetryAnalyzerEnabled>
+                </configuration><executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions></plugin></plugins></build></project>

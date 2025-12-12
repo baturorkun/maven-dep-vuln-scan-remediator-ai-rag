@@ -1,0 +1,5 @@
+# Local vulnerability databases and caches
+odc-data/
+target/
+java-project/*/target/
+.m2

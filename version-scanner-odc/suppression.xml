@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+
+    <!--
+        CVE-2023-44794: False positive
+        This CVE is for Dromara SaToken (Chinese authentication framework)
+        It was incorrectly mapped to Spring Boot in the NVD database.
+
+        Real vulnerability: Dromara SaToken 1.36.0 and before
+        Not applicable to: Spring Boot
+    -->
+    <suppress>
+        <notes><![CDATA[
+        False positive: CVE-2023-44794 is for Dromara SaToken, not Spring Boot.
+        Database mapping error in NVD/OWASP database.
+        Official CVE: https://nvd.nist.gov/vuln/detail/CVE-2023-44794
+        ]]></notes>
+        <cve>CVE-2023-44794</cve>
+        <cpe>cpe:/a:vmware:spring_boot</cpe>
+    </suppress>
+
+</suppressions>

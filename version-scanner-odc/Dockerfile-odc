@@ -1,0 +1,46 @@
+FROM maven:3.9-eclipse-temurin-11
+# ---------------------------------------------------------
+# 1) Python, JayDeBeApi and base packages
+# ---------------------------------------------------------
+RUN apt-get update && \
+    apt-get install -y jq python3 python3-pip python3-packaging python3-yaml python3-requests wget unzip curl gnupg && \
+    pip3 install --break-system-packages JayDeBeApi && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------
+# 2) OWASP Dependency-Check installation
+# ---------------------------------------------------------
+RUN wget -O /tmp/dependency-check.zip https://github.com/jeremylong/DependencyCheck/releases/download/v12.1.0/dependency-check-12.1.0-release.zip && \
+    unzip /tmp/dependency-check.zip -d /opt && \
+    rm /tmp/dependency-check.zip && \
+    chmod +x /opt/dependency-check/bin/dependency-check.sh
+
+COPY odc-data /usr/share/dependency-check/data
+
+# Set environment variables
+ENV PATH="/opt/dependency-check/bin:${PATH}"
+ENV DEPENDENCY_CHECK_HOME="/opt/dependency-check"
+ENV DEPENDENCY_CHECK_DATA="/usr/share/dependency-check/data"
+
+# ---------------------------------------------------------
+# 3) Working directory + Maven cache + Scan cache
+# ---------------------------------------------------------
+WORKDIR /app
+RUN mkdir -p /root/.m2 /opt/scan-cache
+
+# ENV for Scan cache directory
+ENV SCAN_CACHE_DIR=/opt/scan-cache
+
+# ---------------------------------------------------------
+# 4) Python scripts
+# ---------------------------------------------------------
+COPY version-scanner-odc.py /scanner/
+COPY remediation.py /scanner/
+COPY owasp.plugin.xml /scanner/
+
+# ---------------------------------------------------------
+# 5) Default command
+# ---------------------------------------------------------
+ENTRYPOINT ["python3", "/scanner/version-scanner-odc.py"]
+CMD ["--help"]
