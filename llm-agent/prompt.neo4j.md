@@ -45,6 +45,11 @@ This is the most important rule.
     -   `usedByModules`: (list) Array of module names using this dependency.
 -   `ArtifactVersion`: Represents a specific version of a library.
     -   `version`: (string) The version number (e.g., "2.17.1").
+    -   `majorVersion`: (integer) Major version number.
+    -   `minorVersion`: (integer) Minor version number.
+    -   `patchVersion`: (integer) Patch version number.
+    -   `hasCVE`: (boolean) `true` if this version has known vulnerabilities.
+    -   `cveCount`: (integer) Count of known vulnerabilities for this version.
 -   `Vulnerability`: A known CVE.
     -   `name`: (string) CVE identifier (e.g., "CVE-2024-1234").
     -   `severity`: (string) e.g., "CRITICAL", "HIGH", "MEDIUM", "LOW".
