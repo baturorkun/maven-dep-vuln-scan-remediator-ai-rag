@@ -211,6 +211,7 @@ cd llm-agent
 ./venv/bin/python3 -c "from tools import list_projects; print(list_projects())"
 ./venv/bin/python3 -c "from tools import diagnose_graph_relationships; print(diagnose_graph_relationships())"
 ./venv/bin/python3 -c "from tools import get_dependency_tree; print(get_dependency_tree('java-project'))"
+./venv/bin/python3 -c "from tools import get_remediation_suggestions; print(get_remediation_suggestions('java-project'))"
 ```
 
 ### Verify Neo4j Data (Cypher Queries)
@@ -264,40 +265,148 @@ podman ps | grep neo4j
 docker ps | grep neo4j
 ```
 
+### LLM Not Using Remediation Tool
+If LLM doesn't use `get_remediation_suggestions` for remediation queries:
+1. Check that tool is registered in `server.py` (should be there)
+2. Restart the MCP server or Streamlit dashboard
+3. Try specific queries like: "Give me remediation suggestions for java-project"
+4. Verify Neo4j has remediation data: 
+   ```cypher
+   MATCH (d:Dependency)-[:RECOMMENDED_VERSION]->(v) RETURN count(d)
+   ```
+
 ## LLM Agent Tools (tools.py)
+
+**All tools below are registered in MCP server (`server.py`) and available to LLM agents.**
 
 | Tool | Description |
 |------|-------------|
 | `list_projects()` | List all projects with vulnerability summary |
 | `analyze_risk_statistics()` | Comprehensive risk analysis |
 | `get_dependency_tree(name)` | Get dependency tree for project/module/artifact |
+| `get_remediation_suggestions(project_name)` | **Get upgrade recommendations for vulnerable dependencies** - Returns current version, recommended version, CVE count, severity, and upgrade path |
 | `diagnose_graph_relationships()` | Debug database structure |
 | `read_neo4j_query(cypher)` | Run custom Cypher query |
-| `visualize_dependency_graph()` | Generate PNG visualization |
+| `visualize_dependency_graph(limit, output_file, artifact_name)` | Generate PNG visualization. If artifact_name provided, creates transitive tree for that artifact |
 | `enrich_cve_data(cve_id)` | Fetch CVE details from NVD (requires internet) |
+
+### Remediation Suggestions
+
+**LLM Queries that trigger this tool:**
+- "Give me remediation suggestions"
+- "What are the recommended version upgrades?"
+- "Show me upgrade recommendations"
+- "How can I fix these vulnerabilities?"
+- "Give me remediation for java-project"
+
+**Usage:**
+```python
+# Get remediation suggestions for all projects
+get_remediation_suggestions()
+
+# Get remediation suggestions for specific project
+get_remediation_suggestions('java-project')
+```
+
+**Example Response:**
+```json
+{
+  "success": true,
+  "project": "java-project",
+  "remediation_count": 14,
+  "suggestions": [
+    {
+      "artifact": "com.fasterxml.jackson.core:jackson-databind",
+      "current_version": "2.9.8",
+      "recommended_version": "2.16.0",
+      "vulnerability_count": 54,
+      "highest_severity": "CRITICAL",
+      "upgrade_path": []
+    },
+    {
+      "artifact": "org.apache.logging.log4j:log4j-core",
+      "current_version": "2.14.1",
+      "recommended_version": "2.17.1",
+      "vulnerability_count": 4,
+      "highest_severity": "CRITICAL",
+      "upgrade_path": ["2.15.0", "2.16.0", "2.17.0"]
+    }
+  ]
+}
+```
+
+The tool:
+- ✅ Retrieves recommendations from Neo4j (RECOMMENDED_VERSION relationship)
+- ✅ Shows current version and recommended safe version
+- ✅ Includes CVE count and highest severity
+- ✅ Provides upgrade path when available (via UPGRADES_TO relationships)
+- ✅ Sorted by vulnerability count (most critical first)
 
 ### Viewing Generated PNG Files
 
 When `visualize_dependency_graph()` is called, it creates a PNG file (default: `dependency_graph.png`).
+
+**Two modes:**
+1. **Vulnerability Graph** (default): Top vulnerable dependencies
+2. **Transitive Tree** (with artifact_name): Dependency tree for specific artifact
 
 **Option 1: Streamlit Dashboard (Recommended)**
 ```bash
 cd llm-agent
 ./run.sh
 ```
-Go to "🌐 Dependency Graph" tab → Click "Generate Graph" → View & Download
+Go to "🌐 Dependency Graph" tab:
+- **Left panel**: 
+  - Click "Generate Graph" to create `dependency_graph.png`
+  - Browse all saved PNG graphs (auto-refreshed on every tab switch)
+  - Click on any graph to view it
+  - Shows: filename, date, time (HH:MM format)
+  - Selected graph is marked with ✅
+- **Right panel**: 
+  - View selected graph (full size)
+  - File metadata (size, creation time)
+  - Download button available
 
 **Option 2: Open directly on Mac**
 ```bash
 open llm-agent/dependency_graph.png
 ```
 
-**Option 3: Manual generation and view**
+**Option 3: Generate transitive tree for specific artifact**
 ```bash
 cd llm-agent
-./venv/bin/python3 -c "from tools import visualize_dependency_graph; print(visualize_dependency_graph())"
-open dependency_graph.png
+./venv/bin/python3 -c "from tools import visualize_dependency_graph; visualize_dependency_graph(artifact_name='jackson-databind', output_file='jackson_tree.png')"
+open jackson_tree.png
 ```
+
+**Examples:**
+```python
+# Vulnerability graph (default)
+visualize_dependency_graph(limit=20)
+
+# Transitive tree for jackson-databind (Neo4j Browser style)
+visualize_dependency_graph(artifact_name='jackson-databind', output_file='jackson_tree.png')
+
+# Transitive tree for log4j
+visualize_dependency_graph(artifact_name='log4j', output_file='log4j_tree.png')
+```
+
+**Graph Features:**
+- **Professional light theme** - White background with black text for better readability
+- **CVE Information** - Each node shows CVE count (e.g., "jackson-databind\n(54 CVEs)")
+- **Larger canvas** - 24x18 inches for better detail visibility
+- **Bigger nodes** - 4500 size units with no borders for maximum text clarity
+- **Font size 16** - Large, bold black labels for maximum readability
+- **High DPI** - 200 DPI output for crisp, clear images
+- **Bootstrap-inspired color palette** (professional and accessible):
+  - 🔴 #DC3545 - CRITICAL (Bootstrap Danger Red)
+  - 🟠 #FD7E14 - HIGH (Bootstrap Orange)
+  - 🟡 #FFC107 - MEDIUM (Bootstrap Warning Yellow)
+  - 🟢 #28A745 - LOW (Bootstrap Success Green)
+  - 🔵 #17A2B8 - No Vulnerabilities (Bootstrap Info Blue)
+- **Clean design** - White background, no borders, professional appearance
+- **Thicker edges** - 3px gray edges with curved style
+- **Complete legend** - Shows all severity levels and DEPENDS_ON relationship
 
 The PNG file is saved in the `llm-agent/` directory.
 

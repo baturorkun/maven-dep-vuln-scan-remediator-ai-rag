@@ -192,10 +192,11 @@ with tab3:
     col1, col2 = st.columns([1, 3])
 
     with col1:
+        st.subheader("Generate New Graph")
         limit = st.slider("Max Dependencies", min_value=5, max_value=50, value=20)
-        output_file = st.text_input("Output Filename", value="dependency_graph.png")
 
         if st.button("Generate Graph", key="gen_graph"):
+            output_file = "dependency_graph.png"
             with st.spinner("Generating graph..."):
                 result = visualize_dependency_graph(limit=limit, output_file=output_file)
                 data = json.loads(result)
@@ -203,25 +204,77 @@ with tab3:
                 if data["success"]:
                     st.success(data["message"])
                     st.metric("Dependencies", data["dependencies_count"])
-                    st.metric("Vulnerabilities", data["vulnerabilities_count"])
-                    st.metric("Relationships", data["edges_count"])
+                    st.metric("Vulnerabilities", data.get("vulnerabilities_count", data.get("dependencies_count")))
+                    st.metric("Relationships", data.get("edges_count", data.get("relationships_count", 0)))
+                    st.session_state.selected_graph = output_file
+                    # Force refresh
+                    st.rerun()
                 else:
                     st.error(f"Error: {data.get('error', 'Unknown error')}")
 
+        st.markdown("---")
+        st.subheader("Saved Graphs")
+
+        # List all *.png files in current directory (refreshed on every render)
+        import glob
+        png_files = sorted(glob.glob("*.png"), key=os.path.getmtime, reverse=True)
+
+        # Filter out logo.png and other non-graph files
+        graph_files = [f for f in png_files if f != "logo.png"]
+
+        if graph_files:
+            st.caption(f"📁 {len(graph_files)} graph(s) found")
+            for png_file in graph_files:
+                file_time = os.path.getmtime(png_file)
+                from datetime import datetime
+                time_str = datetime.fromtimestamp(file_time).strftime("%Y-%m-%d %H:%M")
+
+                # Show selected state
+                is_selected = st.session_state.get("selected_graph") == png_file
+                button_label = f"{'✅' if is_selected else '📊'} {png_file}"
+
+                if st.button(f"{button_label}\n📅 {time_str}",
+                           key=f"select_{png_file}",
+                           use_container_width=True):
+                    st.session_state.selected_graph = png_file
+                    st.rerun()
+        else:
+            st.info("No graphs yet. Generate one to get started!")
+
     with col2:
-        if os.path.exists(output_file):
-            st.image(output_file, caption="Dependency Vulnerability Graph")
+        # Get selected graph from session state, default to dependency_graph.png
+        selected_file = st.session_state.get("selected_graph", "dependency_graph.png")
+
+        if os.path.exists(selected_file):
+            st.subheader(f"📊 {selected_file}")
+            st.image(selected_file, use_container_width=True)
+
+            # File info
+            file_size = os.path.getsize(selected_file) / 1024
+            file_time = os.path.getmtime(selected_file)
+            from datetime import datetime
+            time_str = datetime.fromtimestamp(file_time).strftime("%Y-%m-%d %H:%M:%S")
+
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.metric("File Size", f"{file_size:.1f} KB")
+            with col_b:
+                st.metric("Created", time_str.split()[1])
+            with col_c:
+                st.metric("Date", time_str.split()[0])
 
             # Download button
-            with open(output_file, "rb") as file:
+            with open(selected_file, "rb") as file:
                 st.download_button(
                     label="📥 Download Graph (PNG)",
                     data=file,
-                    file_name=output_file,
-                    mime="image/png"
+                    file_name=selected_file,
+                    mime="image/png",
+                    key="download_graph",
+                    use_container_width=True
                 )
         else:
-            st.info("Generate a graph to see it here")
+            st.info("Generate a graph or select one from the list to view it here")
 
 # Tab 4: CVE Lookup
 with tab4:

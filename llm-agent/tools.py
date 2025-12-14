@@ -438,16 +438,24 @@ def analyze_risk_statistics() -> str:
             driver.close()
 
 
-def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_graph.png") -> str:
+def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_graph.png", artifact_name: str = None) -> str:
     """
     Create a visual graph of dependencies and their vulnerabilities.
+
+    If artifact_name is provided, creates a transitive dependency tree for that specific artifact.
+    Otherwise, shows top vulnerable dependencies.
 
     Args:
         limit: Maximum number of dependencies to include (default: 20)
         output_file: Output filename for the graph image (default: "dependency_graph.png")
+        artifact_name: Optional artifact name to show transitive tree (e.g., "jackson-databind")
 
     Returns:
         JSON with success status and file path
+
+    Examples:
+        - visualize_dependency_graph() - Top 20 vulnerable dependencies
+        - visualize_dependency_graph(artifact_name="jackson-databind") - jackson-databind's transitive tree
     """
     if not HAS_VISUALIZATION:
         return json.dumps({
@@ -464,6 +472,212 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
         with driver.session() as session:
+            # Check if artifact_name is provided - create transitive tree
+            if artifact_name:
+                # Get transitive dependency tree with DEPENDS_ON relationships AND CVE info
+                query = f"""
+                    MATCH (root:Dependency)
+                    WHERE root.artifactId CONTAINS $artifact_name OR root.groupId CONTAINS $artifact_name
+                    WITH root LIMIT 1
+                    OPTIONAL MATCH path = (root)-[:DEPENDS_ON*1..5]->(child:Dependency)
+                    WITH root, path, child
+                    OPTIONAL MATCH (child)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                    WITH root, 
+                         CASE WHEN child IS NULL THEN [root] ELSE nodes(path) END as path_nodes,
+                         child,
+                         collect(DISTINCT {{name: v.name, severity: v.severity}}) as vulns
+                    UNWIND path_nodes as node
+                    WITH DISTINCT node, 
+                         CASE WHEN node = child THEN vulns ELSE [] END as node_vulns
+                    // Get CVE info for each node
+                    OPTIONAL MATCH (node)-[:HAS_VULNERABILITY]->(cve:Vulnerability)
+                    WITH node,
+                         node.groupId + ':' + node.artifactId as artifact,
+                         node.detectedVersion as version,
+                         collect(DISTINCT cve.name) as cve_list,
+                         collect(DISTINCT cve.severity) as severity_list
+                    RETURN artifact,
+                           version,
+                           size(cve_list) as vuln_count,
+                           cve_list[0..3] as sample_cves,
+                           CASE 
+                               WHEN 'CRITICAL' IN severity_list THEN 'CRITICAL'
+                               WHEN 'HIGH' IN severity_list THEN 'HIGH'
+                               WHEN 'MEDIUM' IN severity_list THEN 'MEDIUM'
+                               WHEN 'LOW' IN severity_list THEN 'LOW'
+                               ELSE null
+                           END as top_severity
+                    LIMIT {limit * 2}
+                """
+                results = session.run(query, artifact_name=artifact_name).data()
+
+                if not results:
+                    return json.dumps({
+                        "success": False,
+                        "error": f"Artifact '{artifact_name}' not found or has no transitive dependencies"
+                    }, indent=2)
+
+                # Get edges for transitive tree
+                edges_query = f"""
+                    MATCH (root:Dependency)
+                    WHERE root.artifactId CONTAINS $artifact_name OR root.groupId CONTAINS $artifact_name
+                    WITH root LIMIT 1
+                    MATCH path = (root)-[:DEPENDS_ON*1..5]->(child:Dependency)
+                    WITH relationships(path) as rels
+                    UNWIND rels as rel
+                    WITH startNode(rel) as source, endNode(rel) as target
+                    RETURN DISTINCT 
+                           source.groupId + ':' + source.artifactId as source_artifact,
+                           target.groupId + ':' + target.artifactId as target_artifact
+                    LIMIT {limit * 5}
+                """
+                edges_results = session.run(edges_query, artifact_name=artifact_name).data()
+
+                # Create directed graph for transitive tree
+                G = nx.DiGraph()
+
+                # Add nodes with vulnerability info and CVE data
+                node_colors = {}
+                node_sizes = {}
+                node_cve_info = {}  # Store CVE info for labels
+
+                for record in results:
+                    node_name = record['artifact']
+                    vuln_count = record['vuln_count']
+                    sample_cves = record.get('sample_cves', [])
+
+                    G.add_node(node_name)
+
+                    # Store CVE info for this node
+                    node_cve_info[node_name] = {
+                        'count': vuln_count,
+                        'cves': sample_cves
+                    }
+
+                    # Professional color palette for light background
+                    if vuln_count > 0:
+                        severity = record['top_severity']
+                        if severity == 'CRITICAL':
+                            node_colors[node_name] = '#DC3545'  # Bootstrap danger red
+                        elif severity == 'HIGH':
+                            node_colors[node_name] = '#FD7E14'  # Bootstrap orange
+                        elif severity == 'MEDIUM':
+                            node_colors[node_name] = '#FFC107'  # Bootstrap warning yellow
+                        else:
+                            node_colors[node_name] = '#28A745'  # Bootstrap success green
+                    else:
+                        node_colors[node_name] = '#17A2B8'  # Bootstrap info blue
+
+                    # Larger nodes for better visibility
+                    node_sizes[node_name] = 4500
+
+                # Add edges
+                for edge in edges_results:
+                    G.add_edge(edge['source_artifact'], edge['target_artifact'])
+
+                # Use force-directed layout with more spacing
+                try:
+                    pos = nx.kamada_kawai_layout(G, scale=2.5)
+                except:
+                    # Fallback to spring layout with more spacing
+                    pos = nx.spring_layout(G, k=4, iterations=200, seed=42)
+
+                # Create larger figure with WHITE background
+                fig, ax = plt.subplots(figsize=(24, 18), facecolor='white')
+                ax.set_facecolor('white')
+
+                # Draw edges - darker gray for better visibility on white
+                nx.draw_networkx_edges(
+                    G, pos,
+                    edge_color='#6C757D',  # Medium gray
+                    alpha=0.6,
+                    arrows=True,
+                    arrowsize=25,
+                    arrowstyle='->',
+                    width=3,
+                    connectionstyle='arc3,rad=0.1',
+                    ax=ax
+                )
+
+                # Draw nodes - vibrant colors WITHOUT thick borders
+                colors = [node_colors.get(node, '#17A2B8') for node in G.nodes()]
+                sizes = [node_sizes.get(node, 4500) for node in G.nodes()]
+
+                nx.draw_networkx_nodes(
+                    G, pos,
+                    node_color=colors,
+                    node_size=sizes,
+                    alpha=0.9,
+                    edgecolors='none',  # No borders for better text readability
+                    linewidths=0,
+                    ax=ax
+                )
+
+                # Draw labels - BLACK text with CVE count
+                labels = {}
+                for node in G.nodes():
+                    # Show only artifactId (last part after :)
+                    parts = node.split(':')
+                    artifact_name = parts[1] if len(parts) >= 2 else node
+
+                    # Add CVE count to label
+                    cve_info = node_cve_info.get(node, {})
+                    cve_count = cve_info.get('count', 0)
+
+                    if cve_count > 0:
+                        labels[node] = f"{artifact_name}\n({cve_count} CVEs)"
+                    else:
+                        labels[node] = artifact_name
+
+                nx.draw_networkx_labels(
+                    G, pos, labels,
+                    font_size=16,  # Large, readable font
+                    font_weight='bold',
+                    font_color='black',  # Black text on white background
+                    font_family='sans-serif',
+                    ax=ax
+                )
+
+                # Add improved legend with dark text
+                legend_elements = [
+                    plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#DC3545',
+                              markersize=15, label='CRITICAL', markeredgewidth=0),
+                    plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FD7E14',
+                              markersize=15, label='HIGH', markeredgewidth=0),
+                    plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#FFC107',
+                              markersize=15, label='MEDIUM', markeredgewidth=0),
+                    plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#28A745',
+                              markersize=15, label='LOW', markeredgewidth=0),
+                    plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='#17A2B8',
+                              markersize=15, label='No Vulnerabilities', markeredgewidth=0),
+                    plt.Line2D([0], [0], color='#6C757D', linewidth=3, label='DEPENDS_ON →'),
+                ]
+                legend = ax.legend(handles=legend_elements, loc='upper left',
+                                 frameon=True, facecolor='white', edgecolor='#DEE2E6',
+                                 fontsize=14, labelcolor='black', title='Legend',
+                                 title_fontsize=16)
+                legend.get_title().set_color('black')
+
+                # Title - black text on white background
+                ax.set_title(f'Dependency Graph: {artifact_name}',
+                           fontsize=24, fontweight='bold', color='black', pad=30)
+
+                ax.axis('off')
+                plt.tight_layout()
+
+                plt.savefig(output_file, dpi=200, bbox_inches='tight', facecolor='white')
+                plt.close()
+
+                return json.dumps({
+                    "success": True,
+                    "output_file": output_file,
+                    "artifact": artifact_name,
+                    "dependencies_count": len(G.nodes()),
+                    "relationships_count": len(G.edges()),
+                    "message": f"Transitive tree for {artifact_name} saved to {output_file}"
+                }, indent=2)
+
+            # Original vulnerability-based graph (when no artifact_name)
             # Get dependencies with their vulnerabilities
             query = f"""
                 MATCH (d:Dependency)-[r:HAS_VULNERABILITY]->(v:Vulnerability)
@@ -1027,4 +1241,175 @@ def get_dependency_tree(artifact_name: str = None, max_depth: int = 5, direction
     finally:
         if driver:
             driver.close()
+
+
+def get_remediation_suggestions(project_name: str = None) -> str:
+    """
+    Get remediation version suggestions for dependencies with vulnerabilities.
+
+    Returns upgrade recommendations from Neo4j database:
+    - Current version
+    - Recommended version (fixes vulnerabilities)
+    - Available upgrade versions
+    - Vulnerability count
+
+    Args:
+        project_name: Optional project name to filter results (default: all projects)
+
+    Returns:
+        JSON with remediation suggestions for each vulnerable dependency
+
+    Example response:
+    {
+      "success": true,
+      "project": "java-project",
+      "remediation_count": 5,
+      "suggestions": [
+        {
+          "artifact": "org.apache.logging.log4j:log4j-api",
+          "current_version": "2.14.1",
+          "recommended_version": "2.17.1",
+          "vulnerability_count": 12,
+          "upgrade_path": ["2.15.0", "2.16.0", "2.17.0", "2.17.1"]
+        }
+      ]
+    }
+    """
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+
+    driver = None
+    try:
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+        with driver.session() as session:
+            # Build query with optional project filter
+            if project_name:
+                query = """
+                    // Get dependencies with remediation recommendations for specific project
+                    MATCH (p:Project)-[:HAS_MODULE]->(m:Module)-[:USES_DEPENDENCY]->(d:Dependency)
+                    WHERE p.name CONTAINS $project_name AND d.hasRemediation = true
+                    
+                    // Get current version
+                    OPTIONAL MATCH (d)-[:CURRENT_VERSION]->(cv:ArtifactVersion)
+                    
+                    // Get recommended version
+                    OPTIONAL MATCH (d)-[:RECOMMENDED_VERSION]->(rv:ArtifactVersion)
+                    
+                    // Get upgrade path
+                    OPTIONAL MATCH path = (cv)-[:UPGRADES_TO*1..5]->(rv)
+                    WITH d, cv, rv, path,
+                         [node IN nodes(path) | node.version] as upgrade_versions
+                    
+                    // Count vulnerabilities
+                    OPTIONAL MATCH (d)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                    WITH d, cv, rv, upgrade_versions,
+                         count(DISTINCT v) as vuln_count,
+                         collect(DISTINCT v.severity) as severities
+                    
+                    // Return results
+                    RETURN DISTINCT
+                        d.groupId + ':' + d.artifactId as artifact,
+                        cv.version as current_version,
+                        rv.version as recommended_version,
+                        vuln_count,
+                        CASE 
+                            WHEN 'CRITICAL' IN severities THEN 'CRITICAL'
+                            WHEN 'HIGH' IN severities THEN 'HIGH'
+                            WHEN 'MEDIUM' IN severities THEN 'MEDIUM'
+                            WHEN 'LOW' IN severities THEN 'LOW'
+                            ELSE 'UNKNOWN'
+                        END as highest_severity,
+                        upgrade_versions[1..-1] as upgrade_path
+                    ORDER BY vuln_count DESC, highest_severity
+                """
+                params = {"project_name": project_name}
+            else:
+                query = """
+                    // Get dependencies with remediation recommendations for all projects
+                    MATCH (p:Project)-[:HAS_MODULE]->(m:Module)-[:USES_DEPENDENCY]->(d:Dependency)
+                    WHERE d.hasRemediation = true
+                    
+                    // Get current version
+                    OPTIONAL MATCH (d)-[:CURRENT_VERSION]->(cv:ArtifactVersion)
+                    
+                    // Get recommended version
+                    OPTIONAL MATCH (d)-[:RECOMMENDED_VERSION]->(rv:ArtifactVersion)
+                    
+                    // Get upgrade path
+                    OPTIONAL MATCH path = (cv)-[:UPGRADES_TO*1..5]->(rv)
+                    WITH d, cv, rv, path,
+                         [node IN nodes(path) | node.version] as upgrade_versions
+                    
+                    // Count vulnerabilities
+                    OPTIONAL MATCH (d)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                    WITH d, cv, rv, upgrade_versions,
+                         count(DISTINCT v) as vuln_count,
+                         collect(DISTINCT v.severity) as severities
+                    
+                    // Return results
+                    RETURN DISTINCT
+                        d.groupId + ':' + d.artifactId as artifact,
+                        cv.version as current_version,
+                        rv.version as recommended_version,
+                        vuln_count,
+                        CASE 
+                            WHEN 'CRITICAL' IN severities THEN 'CRITICAL'
+                            WHEN 'HIGH' IN severities THEN 'HIGH'
+                            WHEN 'MEDIUM' IN severities THEN 'MEDIUM'
+                            WHEN 'LOW' IN severities THEN 'LOW'
+                            ELSE 'UNKNOWN'
+                        END as highest_severity,
+                        upgrade_versions[1..-1] as upgrade_path
+                    ORDER BY vuln_count DESC, highest_severity
+                """
+                params = {}
+
+            results = session.run(query, **params).data()
+
+            if not results:
+                return json.dumps({
+                    "success": True,
+                    "project": project_name or "all projects",
+                    "remediation_count": 0,
+                    "message": "No remediation suggestions found. This could mean:\n" +
+                              "  - No dependencies have recommended versions\n" +
+                              "  - All dependencies are already up to date\n" +
+                              "  - Project name doesn't match",
+                    "suggestions": []
+                }, indent=2)
+
+            # Format results
+            suggestions = []
+            for record in results:
+                suggestion = {
+                    "artifact": record["artifact"],
+                    "current_version": record["current_version"],
+                    "recommended_version": record["recommended_version"],
+                    "vulnerability_count": record["vuln_count"],
+                    "highest_severity": record["highest_severity"],
+                    "upgrade_path": record["upgrade_path"] or []
+                }
+                suggestions.append(suggestion)
+
+            return json.dumps({
+                "success": True,
+                "project": project_name or "all projects",
+                "remediation_count": len(suggestions),
+                "message": f"Found {len(suggestions)} remediation suggestion(s)",
+                "suggestions": suggestions
+            }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to retrieve remediation suggestions from Neo4j"
+        }, indent=2)
+    finally:
+        if driver:
+            driver.close()
+
+
 # End of tools.py - no more code after this
