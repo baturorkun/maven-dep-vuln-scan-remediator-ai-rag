@@ -24,6 +24,23 @@ load_dotenv()
 # Project Title from environment variable
 PROJECT_TITLE = os.getenv("PROJECT_TITLE", "DRAI - Dependency Scan & Remediate AI Asistant")
 
+# Project Logo from environment variable (optional)
+PROJECT_LOGO = os.getenv("PROJECT_LOGO", "").strip()
+logo_source = None
+if PROJECT_LOGO:
+    # If it's a URL, use it directly
+    if PROJECT_LOGO.startswith(("http://", "https://")):
+        logo_source = PROJECT_LOGO
+    else:
+        # Try local file next to this script
+        local_logo_path = os.path.join(os.path.dirname(__file__), PROJECT_LOGO)
+        if os.path.exists(local_logo_path):
+            logo_source = local_logo_path
+        # Fall back to using the value as-is (could be an absolute path)
+        elif os.path.exists(PROJECT_LOGO):
+            logo_source = PROJECT_LOGO
+        # If not found, leave logo_source as None (don't show anything)
+
 # Page configuration
 st.set_page_config(
     page_title="OWASP Dependency Analysis",
@@ -52,6 +69,10 @@ st.markdown("""
     border-bottom: 2px solid #1f77b4;
     margin-bottom: 20px;
 }
+/* Hide only the Deploy button, keep hamburger menu and running man */
+button[kind="header"] {
+    display: none !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -60,6 +81,15 @@ st.title("🔒 OWASP Dependency Analysis Dashboard")
 st.markdown("---")
 
 # Sidebar
+# Show logo above the project title if provided and found
+if logo_source:
+    try:
+        # Use the full sidebar width for the logo so it fills the available space
+        st.sidebar.image(logo_source, use_container_width=True)
+    except Exception:
+        # If image loading fails, silently continue and show no logo
+        pass
+
 st.sidebar.markdown(f'<p class="sidebar-title">🤖 {PROJECT_TITLE}</p>', unsafe_allow_html=True)
 st.sidebar.header("Configuration")
 neo4j_uri = st.sidebar.text_input("Neo4j URI", value=os.getenv("NEO4J_URI", "bolt://localhost:7687"))
@@ -181,6 +211,15 @@ with tab3:
     with col2:
         if os.path.exists(output_file):
             st.image(output_file, caption="Dependency Vulnerability Graph")
+
+            # Download button
+            with open(output_file, "rb") as file:
+                st.download_button(
+                    label="📥 Download Graph (PNG)",
+                    data=file,
+                    file_name=output_file,
+                    mime="image/png"
+                )
         else:
             st.info("Generate a graph to see it here")
 

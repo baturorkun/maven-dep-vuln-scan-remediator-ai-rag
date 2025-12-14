@@ -381,32 +381,65 @@ def map_graphml_node_to_sha256(node_label: str, odc_lookup: Dict[str, List[Dict]
     # Example: "com.fasterxml.jackson.core:jackson-databind:jar:2.9.8:compile"
     parts = node_label.split(':')
 
-    # Standard Maven format has 5 parts
+    group_id = None
+    artifact_id = None
+    version = None
+
+    # Standard Maven format has 5 parts: groupId:artifactId:type:version:scope
     if len(parts) == 5:
         group_id = parts[0]      # com.fasterxml.jackson.core
         artifact_id = parts[1]   # jackson-databind
-        type_ = parts[2]         # jar (not used)
+        # type_ = parts[2]       # jar (not used)
         version = parts[3]       # 2.9.8
-        scope = parts[4]         # compile (not used)
+        # scope = parts[4]       # compile (not used)
     elif len(parts) == 4:
         # Fallback: groupId:artifactId:version:scope (no type)
         group_id = parts[0]
         artifact_id = parts[1]
         version = parts[2]
-        scope = parts[3]
+        # scope = parts[3]
+    elif len(parts) == 3:
+        # Fallback: groupId:artifactId:version
+        group_id = parts[0]
+        artifact_id = parts[1]
+        version = parts[2]
+    elif len(parts) == 2:
+        # Fallback: groupId:artifactId
+        group_id = parts[0]
+        artifact_id = parts[1]
     else:
         # Unsupported format
+        return None
+
+    if not group_id or not artifact_id:
         return None
 
     # Look up in ODC map
     key = f"{group_id}:{artifact_id}"
     candidates = odc_lookup.get(key, [])
 
-    # Find exact version match
-    for candidate in candidates:
-        if candidate.get('version') == version:
-            return candidate.get('sha256')
+    # Find exact version match first
+    if version:
+        for candidate in candidates:
+            if candidate.get('version') == version:
+                return candidate.get('sha256')
 
+    # Fallback 1: If only one candidate exists, assume it is the match
+    if len(candidates) == 1:
+        return candidates[0].get('sha256')
+
+    # Fallback 2: Try partial version match
+    if version and candidates:
+        for candidate in candidates:
+            cand_ver = candidate.get('version')
+            if cand_ver and (cand_ver.startswith(version) or version.startswith(cand_ver)):
+                return candidate.get('sha256')
+
+    # Fallback 3: Return first candidate if any exist (better than nothing)
+    if candidates:
+        return candidates[0].get('sha256')
+
+    # No match found
     return None
 
 
@@ -550,16 +583,18 @@ class Neo4jImporter:
         # Import GraphML edges as DEPENDS_ON relationships
         if graphml_edges:
             print_info(f"  Importing GraphML edges as DEPENDS_ON relationships...")
-            print_info(f"  ODC lookup map has {len(odc_lookup)} unique artifacts")
+            # First, ensure all GraphML nodes exist as Dependency nodes (even if not in ODC)
+            self._ensure_graphml_dependencies_exist(session, module_id, graphml_data, root_node_id)
             self._import_graphml_edges(session, graphml_edges, graphml_data, odc_lookup, root_node_id)
 
         # Import "phantom" dependencies from POM that don't appear in ODC/GraphML
         # These are typically BOM/starter packages like spring-boot-starter-web
         if module.pom_path:
             pom_dependencies = parse_pom_dependencies(module.pom_path)
-            self._import_pom_phantom_dependencies(session, module_id, pom_dependencies, odc_lookup)
+            # Pass remediation_map so phantom nodes can get remediation/version info if available
+            self._import_pom_phantom_dependencies(session, module_id, pom_dependencies, odc_lookup, remediation_map)
 
-    def _import_pom_phantom_dependencies(self, session, module_id: str, pom_deps: List[Dict], odc_lookup: Dict):
+    def _import_pom_phantom_dependencies(self, session, module_id: str, pom_deps: List[Dict], odc_lookup: Dict, remediation_map: Dict = None):
         """
         Import dependencies declared in POM but not found in OWASP Dependency Check.
 
@@ -633,6 +668,72 @@ class Neo4jImporter:
             phantom_count += 1
             phantom_deps.append({'phantom_id': phantom_id, 'gid': gid, 'aid': aid})
             print_info(f"    + Phantom: {gid}:{aid}:{version or 'unknown'}")
+
+            # If remediation exists for this phantom, create ArtifactVersion nodes/links
+            rem_entry = None
+            if remediation_map:
+                rem_entry = remediation_map.get(f"{gid}:{aid}")
+
+            if rem_entry:
+                # Create CURRENT/RECOMMENDED/AVAILABLE ArtifactVersion nodes and relationships
+                # Use the same structure as used for regular dependencies
+                session.run("""
+                    MATCH (d:Dependency {phantomId: $phantom_id})
+                    MERGE (cur:ArtifactVersion { key: d.groupId + ':' + d.artifactId + ':' + $currentVersion })
+                    ON CREATE SET
+                      cur.gid = d.groupId,
+                      cur.aid = d.artifactId,
+                      cur.version = $currentVersion,
+                      cur.majorVersion = toInteger(split($currentVersion, '.')[0]),
+                      cur.minorVersion = CASE WHEN size(split($currentVersion, '.')) > 1 THEN toInteger(split($currentVersion, '.')[1]) ELSE 0 END,
+                      cur.patchVersion = CASE WHEN size(split($currentVersion, '.')) > 2 THEN toInteger(split($currentVersion, '.')[2]) ELSE 0 END,
+                      cur.created = datetime(),
+                      cur.updated = datetime()
+                    ON MATCH SET cur.updated = datetime()
+
+                    MERGE (d)-[rcur:CURRENT_VERSION {project: $project_code, module: $module_name}]->(cur)
+                    ON CREATE SET rcur.detectedAt = datetime()
+
+                    FOREACH (_ IN CASE WHEN $remediationVersion IS NULL THEN [] ELSE [1] END |
+                      MERGE (rec:ArtifactVersion { key: d.groupId + ':' + d.artifactId + ':' + $remediationVersion })
+                      ON CREATE SET
+                        rec.gid = d.groupId,
+                        rec.aid = d.artifactId,
+                        rec.version = $remediationVersion,
+                        rec.majorVersion = toInteger(split($remediationVersion, '.')[0]),
+                        rec.minorVersion = CASE WHEN size(split($remediationVersion, '.')) > 1 THEN toInteger(split($remediationVersion, '.')[1]) ELSE 0 END,
+                        rec.patchVersion = CASE WHEN size(split($remediationVersion, '.')) > 2 THEN toInteger(split($remediationVersion, '.')[2]) ELSE 0 END,
+                        rec.hasCVE = false,
+                        rec.cveCount = 0,
+                        rec.created = datetime(),
+                        rec.updated = datetime()
+                      ON MATCH SET rec.updated = datetime()
+
+                      MERGE (d)-[rrec:RECOMMENDED_VERSION {project: $project_code, module: $module_name}]->(rec)
+                      ON CREATE SET rrec.detectedAt = datetime()
+                    )
+
+                    FOREACH (v IN COALESCE($availableVersions, []) |
+                      MERGE (av:ArtifactVersion { key: d.groupId + ':' + d.artifactId + ':' + v })
+                      ON CREATE SET
+                        av.gid = d.groupId,
+                        av.aid = d.artifactId,
+                        av.version = v,
+                        av.majorVersion = toInteger(split(v, '.')[0]),
+                        av.minorVersion = CASE WHEN size(split(v, '.')) > 1 THEN toInteger(split(v, '.')[1]) ELSE 0 END,
+                        av.patchVersion = CASE WHEN size(split(v, '.')) > 2 THEN toInteger(split(v, '.')[2]) ELSE 0 END,
+                        av.created = datetime(),
+                        av.updated = datetime()
+                      ON MATCH SET av.updated = datetime()
+
+                      MERGE (d)-[rav:AVAILABLE_VERSION {project: $project_code, module: $module_name}]->(av)
+                      ON CREATE SET rav.detectedAt = datetime()
+                    )
+
+                    SET d.hasRemediation = true
+                """, phantom_id=phantom_id, currentVersion=rem_entry.get('currentVersion') or 'unknown',
+                     remediationVersion=rem_entry.get('remediationVersion'), availableVersions=rem_entry.get('availableVersions'),
+                     project_code=project_code, module_name=module_name)
 
         # Link phantom dependencies to related ODC packages
         # Strategy: Match by groupId prefix for known starter patterns
@@ -922,20 +1023,110 @@ class Neo4jImporter:
                 END
         """, name=vuln_name, props=vuln_props, dep_sha256=dep_sha256, severity=severity)
 
+    def _ensure_graphml_dependencies_exist(self, session, module_id: str, graphml_data: Dict, root_node_id: str = None):
+        """
+        Ensure all dependencies from GraphML exist in Neo4j.
+
+        This is important because ODC may not report all transitive dependencies
+        (e.g., non-vulnerable ones). We need these nodes to exist for DEPENDS_ON
+        relationships to work.
+
+        Args:
+            session: Neo4j session
+            module_id: Module ID for context
+            graphml_data: Dictionary of node_id -> node_data from parse_graphml
+            root_node_id: Root node ID to skip (module itself)
+        """
+        created_count = 0
+        existing_count = 0
+        project_code, module_name = module_id.split(':', 1)
+
+        for node_id, node_data in graphml_data.items():
+            # Skip root node (it's the module itself, not a dependency)
+            if node_id == root_node_id:
+                continue
+
+            label = node_data.get('label')
+            if not label:
+                continue
+
+            coords = self._parse_maven_label(label)
+            if not coords:
+                continue
+
+            group_id = coords.get('groupId')
+            artifact_id = coords.get('artifactId')
+            version = coords.get('version')
+
+            if not group_id or not artifact_id:
+                continue
+
+            # Check if dependency already exists
+            existing = session.run("""
+                MATCH (d:Dependency)
+                WHERE d.groupId = $gid AND d.artifactId = $aid
+                RETURN d.sha256 as sha256
+                LIMIT 1
+            """, gid=group_id, aid=artifact_id).single()
+
+            if existing:
+                existing_count += 1
+            else:
+                # Create a "GraphML-only" dependency node
+                # These are transitive deps not in ODC (likely not vulnerable)
+                graphml_id = f"graphml:{group_id}:{artifact_id}:{version or 'unknown'}"
+
+                session.run("""
+                    MERGE (d:Dependency {graphmlId: $graphml_id})
+                    SET d.groupId = $gid,
+                        d.artifactId = $aid,
+                        d.detectedVersion = $version,
+                        d.isGraphmlOnly = true,
+                        d.isDirectDependency = false,
+                        d.hasRemediation = false,
+                        d.description = 'Transitive dependency from GraphML (not in OWASP DC report)',
+                        d.usedByModules = CASE
+                            WHEN d.usedByModules IS NULL THEN [$module_name]
+                            WHEN NOT $module_name IN d.usedByModules THEN d.usedByModules + $module_name
+                            ELSE d.usedByModules
+                        END,
+                        d.usedByProjects = CASE
+                            WHEN d.usedByProjects IS NULL THEN [$project_code]
+                            WHEN NOT $project_code IN d.usedByProjects THEN d.usedByProjects + $project_code
+                            ELSE d.usedByProjects
+                        END
+                    WITH d
+                    MATCH (m:Module {id: $module_id})
+                    MERGE (m)-[:USES_DEPENDENCY]->(d)
+                """, graphml_id=graphml_id, gid=group_id, aid=artifact_id,
+                     version=version, module_id=module_id, module_name=module_name,
+                     project_code=project_code)
+
+                created_count += 1
+
+        if created_count > 0:
+            print_success(f"  Created {created_count} GraphML-only dependency nodes")
+        print_info(f"  Found {existing_count} existing dependencies in Neo4j")
+
     def _import_graphml_edges(self, session, edges_list: List[Dict], graphml_data: Dict, odc_lookup: Dict, root_node_id: str = None):
         """
-        Import all GraphML edges as DEPENDS_ON relationships
+        Import all GraphML edges as DEPENDS_ON relationships.
+
+        NEW APPROACH: Instead of SHA256 matching, use groupId:artifactId matching.
+        This is more reliable because GraphML labels contain exact Maven coordinates.
 
         Args:
             session: Neo4j session
             edges_list: List of edges from parse_graphml
             graphml_data: Node data from parse_graphml
-            odc_lookup: ODC lookup map from build_odc_lookup_map()
+            odc_lookup: ODC lookup map (kept for compatibility, not used in new approach)
             root_node_id: Root node ID to skip (module itself)
         """
         imported_count = 0
-        skipped_count = 0
         skipped_root_edges = 0
+        not_found_count = 0
+
+        print_info(f"  Processing {len(edges_list)} GraphML edges...")
 
         for edge in edges_list:
             source_id = edge.get('source_id')
@@ -947,40 +1138,83 @@ class Neo4jImporter:
                 skipped_root_edges += 1
                 continue
 
-            # DEBUG: İlk 3 edge için detay göster
-            if imported_count + skipped_count < 3:
-                print_info(f"  Edge #{imported_count + skipped_count + 1}:")
-                print_info(f"    Source: {source_label[:60] if source_label else 'None'}...")
-                print_info(f"    Target: {target_label[:60] if target_label else 'None'}...")
+            # Parse labels to get groupId:artifactId
+            source_coords = self._parse_maven_label(source_label)
+            target_coords = self._parse_maven_label(target_label)
 
-            # Map both nodes to SHA256
-            source_sha256 = map_graphml_node_to_sha256(source_label, odc_lookup)
-            target_sha256 = map_graphml_node_to_sha256(target_label, odc_lookup)
-
-            # DEBUG
-            if imported_count + skipped_count < 3:
-                print_info(f"    Source SHA256: {source_sha256[:16] + '...' if source_sha256 else 'None'}")
-                print_info(f"    Target SHA256: {target_sha256[:16] + '...' if target_sha256 else 'None'}")
-
-            if not source_sha256 or not target_sha256:
-                # Skip if either node not in ODC (virtual package)
-                skipped_count += 1
+            if not source_coords or not target_coords:
+                not_found_count += 1
                 continue
 
-            # Create DEPENDS_ON relationship
-            session.run("""
-                MATCH (source:Dependency {sha256: $source_sha256})
-                MATCH (target:Dependency {sha256: $target_sha256})
+            # Create DEPENDS_ON relationship using groupId + artifactId matching
+            # This is more reliable than SHA256 matching
+            result = session.run("""
+                MATCH (source:Dependency)
+                WHERE source.groupId = $source_gid AND source.artifactId = $source_aid
+                MATCH (target:Dependency)
+                WHERE target.groupId = $target_gid AND target.artifactId = $target_aid
                 MERGE (source)-[:DEPENDS_ON]->(target)
-            """, source_sha256=source_sha256, target_sha256=target_sha256)
+                RETURN count(*) as created
+            """,
+                source_gid=source_coords['groupId'],
+                source_aid=source_coords['artifactId'],
+                target_gid=target_coords['groupId'],
+                target_aid=target_coords['artifactId']
+            )
 
-            imported_count += 1
+            created = result.single()["created"]
+            if created > 0:
+                imported_count += 1
+            else:
+                not_found_count += 1
+                if not_found_count <= 3:
+                    print_warning(f"    No match for: {source_coords['groupId']}:{source_coords['artifactId']} -> {target_coords['groupId']}:{target_coords['artifactId']}")
 
         print_success(f"Created {imported_count} DEPENDS_ON relationships")
         if skipped_root_edges > 0:
-            print_info(f"Skipped {skipped_root_edges} edges from module root (use USES_DEPENDENCY instead)")
-        if skipped_count > 0:
-            print_info(f"Skipped {skipped_count} edges (virtual/missing packages)")
+            print_info(f"  Skipped {skipped_root_edges} edges from module root (handled via USES_DEPENDENCY)")
+        if not_found_count > 0:
+            print_warning(f"  Could not match {not_found_count} edges (dependencies not in Neo4j)")
+
+    def _parse_maven_label(self, label: str) -> Optional[Dict[str, str]]:
+        """
+        Parse Maven coordinate label from GraphML.
+
+        Format: "groupId:artifactId:type:version:scope" or "groupId:artifactId:jar:version"
+        Example: "com.fasterxml.jackson.core:jackson-databind:jar:2.9.8:compile"
+
+        Returns:
+            Dict with groupId, artifactId, version or None if parse fails
+        """
+        if not label:
+            return None
+
+        parts = label.split(':')
+
+        if len(parts) >= 4:
+            # Standard format: groupId:artifactId:type:version[:scope]
+            return {
+                'groupId': parts[0],
+                'artifactId': parts[1],
+                'type': parts[2],
+                'version': parts[3],
+                'scope': parts[4] if len(parts) > 4 else 'compile'
+            }
+        elif len(parts) == 3:
+            # Short format: groupId:artifactId:version
+            return {
+                'groupId': parts[0],
+                'artifactId': parts[1],
+                'version': parts[2]
+            }
+        elif len(parts) == 2:
+            # Minimal format: groupId:artifactId
+            return {
+                'groupId': parts[0],
+                'artifactId': parts[1]
+            }
+
+        return None
 
     def _create_version_upgrade_paths(self, session):
         """Create UPGRADES_TO relationships between consecutive versions of same artifact"""

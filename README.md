@@ -23,7 +23,7 @@ This project provides a comprehensive solution for:
 ┌─────────────────────┐
 │ OWASP Dependency    │
 │ Check Scanner       │
-│ (Docker Container)  │
+│ (Container)  │
 └──────────┬──────────┘
            │
            ▼

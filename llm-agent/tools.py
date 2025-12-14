@@ -13,13 +13,62 @@ try:
     import networkx as nx
     HAS_VISUALIZATION = True
 except ImportError:
+    matplotlib = None
+    plt = None
+    nx = None
     HAS_VISUALIZATION = False
 
 try:
     import requests
     HAS_REQUESTS = True
 except ImportError:
+    requests = None
     HAS_REQUESTS = False
+
+
+def read_neo4j_query(cypher_query: str) -> str:
+    """
+    Execute a raw Cypher query against Neo4j and return results.
+
+    Use this tool when:
+    - You need to run a custom Cypher query
+    - Other tools don't provide the specific data you need
+    - The user asks for specific graph queries
+
+    Args:
+        cypher_query: A valid Cypher query string
+
+    Returns:
+        JSON with query results or error message
+    """
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+
+    driver = None
+    try:
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+        with driver.session() as session:
+            result = session.run(cypher_query)
+            records = result.data()
+
+            return json.dumps({
+                "success": True,
+                "query": cypher_query,
+                "result_count": len(records),
+                "results": records
+            }, indent=2, default=str)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "query": cypher_query,
+            "error": str(e)
+        }, indent=2)
+    finally:
+        if driver:
+            driver.close()
 
 
 def list_projects() -> str:
@@ -53,43 +102,65 @@ def list_projects() -> str:
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
         with driver.session() as session:
-            # Get all projects with their modules, dependencies, vulnerabilities and remediations
-            # NOTE: remediationCoverage = % of vulnerable dependencies that have a remediation
-            result = session.run("""
-                MATCH (p:Project)
-                OPTIONAL MATCH (p)-[:HAS_MODULE]->(m:Module)
+            # Step 1: per-module aggregation to avoid grouping mistakes in a single complex Cypher
+            per_module_rows = session.run("""
+                MATCH (p:Project)-[:HAS_MODULE]->(m:Module)
                 OPTIONAL MATCH (m)-[:USES_DEPENDENCY]->(d:Dependency)
                 OPTIONAL MATCH (d)-[:HAS_VULNERABILITY]->(v:Vulnerability)
-                WITH p, m, d, count(v) as vulnCountPerDep
-                WITH p, m,
-                     count(DISTINCT d) as depCount,
-                     count(DISTINCT CASE WHEN vulnCountPerDep > 0 THEN d END) as vulnDepCount,
-                     count(DISTINCT CASE WHEN vulnCountPerDep > 0 AND d.hasRemediation = true THEN d END) as remDepCount
-                WITH p, collect({
-                    name: m.name, 
-                    id: m.id,
-                    dependencyCount: depCount,
-                    vulnerableDependencies: vulnDepCount,
-                    remediatedDependencies: remDepCount
-                }) as modules,
-                sum(depCount) as totalDeps,
-                sum(vulnDepCount) as totalVulnDeps,
-                sum(remDepCount) as totalRemDeps
-                RETURN p.name as projectName, 
-                       p.updated as lastUpdated,
-                       size(modules) as moduleCount,
-                       totalDeps as totalDependencies,
-                       totalVulnDeps as vulnerableDependencies,
-                       totalRemDeps as remediatedDependencies,
-                       modules
-                ORDER BY totalVulnDeps DESC, p.name
+                WITH p, m, count(DISTINCT d) as depCount,
+                     count(DISTINCT CASE WHEN v IS NOT NULL THEN d END) as vulnDepCount,
+                     count(DISTINCT CASE WHEN v IS NOT NULL AND d.hasRemediation = true THEN d END) as remDepCount
+                RETURN p.name as projectName, p.updated as lastUpdated, m.name as moduleName, m.id as moduleId, depCount, vulnDepCount, remDepCount
+                ORDER BY p.name, m.name
             """).data()
 
-            # Get summary statistics
+            # Aggregate per-project in Python for reliability
+            projects_map = {}
+            for row in per_module_rows:
+                pname = row['projectName']
+                if pname not in projects_map:
+                    projects_map[pname] = {
+                        'projectName': pname,
+                        'lastUpdated': row.get('lastUpdated'),
+                        'modules': [],
+                        'totalDependencies': 0,
+                        'vulnerableDependencies': 0,
+                        'remediatedDependencies': 0
+                    }
+
+                projects_map[pname]['modules'].append({
+                    'name': row.get('moduleName'),
+                    'id': row.get('moduleId'),
+                    'dependencyCount': row.get('depCount', 0),
+                    'vulnerableDependencies': row.get('vulnDepCount', 0),
+                    'remediatedDependencies': row.get('remDepCount', 0)
+                })
+
+                projects_map[pname]['totalDependencies'] += row.get('depCount') or 0
+                projects_map[pname]['vulnerableDependencies'] += row.get('vulnDepCount') or 0
+                projects_map[pname]['remediatedDependencies'] += row.get('remDepCount') or 0
+
+            # Build resulting list and sort by vulnerable deps desc
+            result = []
+            for pname, pdata in projects_map.items():
+                result.append({
+                    'projectName': pdata['projectName'],
+                    'lastUpdated': pdata['lastUpdated'],
+                    'moduleCount': len(pdata['modules']),
+                    'totalDependencies': pdata['totalDependencies'],
+                    'vulnerableDependencies': pdata['vulnerableDependencies'],
+                    'remediatedDependencies': pdata['remediatedDependencies'],
+                    'modules': pdata['modules']
+                })
+
+            # Sort
+            result = sorted(result, key=lambda x: x.get('vulnerableDependencies', 0), reverse=True)
+
+            # Compute summary statistics
             total_projects = len(result)
-            total_modules = sum(p["moduleCount"] for p in result)
-            total_vuln_deps = sum(p["vulnerableDependencies"] or 0 for p in result)
-            total_rem_deps = sum(p["remediatedDependencies"] or 0 for p in result)
+            total_modules = sum(p['moduleCount'] for p in result)
+            total_vuln_deps = sum(p['vulnerableDependencies'] or 0 for p in result)
+            total_rem_deps = sum(p['remediatedDependencies'] or 0 for p in result)
 
             return json.dumps({
                 "success": True,
@@ -613,101 +684,347 @@ def enrich_cve_data(cve_id: str) -> str:
         }, indent=2)
 
 
-def read_neo4j_query(query: str) -> str:
+def diagnose_graph_relationships() -> str:
     """
-    Execute a Cypher query on Neo4j database containing OWASP dependency check data.
+    Diagnose the graph database to check relationship counts and data integrity.
 
-    Args:
-        query: Cypher query to execute (e.g., 'MATCH (v:Vulnerability) RETURN v.name, v.severity LIMIT 10')
+    Use this tool when:
+    - The user asks "why can't I see the dependency tree?"
+    - Dependency tree queries return empty results
+    - You need to understand the database structure
+    - Before attempting complex tree queries
 
-    Common query examples:
-    - List all vulnerabilities: "MATCH (v:Vulnerability) RETURN v.name, v.severity, v.cvssScore ORDER BY v.cvssScore DESC LIMIT 10"
-    - Count vulnerabilities by severity: "MATCH (v:Vulnerability) RETURN v.severity, count(*) as count ORDER BY count DESC"
-    - Find dependencies with vulnerabilities: "MATCH (d:Dependency)-[:HAS_VULNERABILITY]->(v:Vulnerability) RETURN d.fileName, count(v) as vulnCount ORDER BY vulnCount DESC LIMIT 10"
-    - Get specific CVE details: "MATCH (v:Vulnerability {name: 'CVE-2024-1234'}) RETURN v"
-    - Critical vulnerabilities: "MATCH (d:Dependency)-[:HAS_VULNERABILITY]->(v:Vulnerability {severity: 'CRITICAL'}) RETURN d.fileName, v.name, v.cvssScore"
+    Returns:
+        JSON with diagnostic information about all node types and relationships
     """
-    # Auto-fix common SQL->Cypher mistakes
-    original_query = query
-    query_upper = query.upper()
-
-    # Check for GROUP BY and auto-fix
-    if "GROUP BY" in query_upper:
-        # Remove GROUP BY clause
-        import re
-        # Pattern: GROUP BY [field_name] (before RETURN, ORDER BY, or end)
-        query = re.sub(r'\s+GROUP\s+BY\s+[^\s]+(\s|$)', ' ', query, flags=re.IGNORECASE)
-        warning_msg = f"⚠️ AUTO-FIXED: Removed 'GROUP BY' (not valid in Cypher). Original: {original_query}"
-        print(warning_msg)
-
-    # Get Neo4j credentials from environment variables
     NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
     driver = None
     try:
-        # Connect to Neo4j
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
-        # Execute query
         with driver.session() as session:
-            result = session.run(query)
-
-            # Convert results to list of dictionaries
-            records = []
-            for record in result:
-                # Convert Record to dictionary
-                record_dict = {}
-                for key in record.keys():
-                    value = record[key]
-                    # Handle Neo4j node/relationship objects
-                    if hasattr(value, '__dict__'):
-                        record_dict[key] = dict(value)
-                    else:
-                        record_dict[key] = value
-                records.append(record_dict)
-
-            return json.dumps({
+            diagnostics = {
                 "success": True,
-                "query": query,
-                "results": records,
-                "count": len(records)
-            }, indent=2)
+                "node_counts": {},
+                "relationship_counts": {},
+                "dependency_analysis": {},
+                "recommendations": []
+            }
+
+            # Node counts
+            for label in ["Project", "Module", "Dependency", "Vulnerability", "ArtifactVersion"]:
+                count = session.run(f"MATCH (n:{label}) RETURN count(n) as cnt").single()["cnt"]
+                diagnostics["node_counts"][label] = count
+
+            # Relationship counts
+            rel_types = ["HAS_MODULE", "USES_DEPENDENCY", "HAS_VULNERABILITY", "DEPENDS_ON",
+                         "CURRENT_VERSION", "RECOMMENDED_VERSION", "AVAILABLE_VERSION", "UPGRADES_TO"]
+            for rel in rel_types:
+                count = session.run(f"MATCH ()-[r:{rel}]->() RETURN count(r) as cnt").single()["cnt"]
+                diagnostics["relationship_counts"][rel] = count
+
+            # Dependency analysis
+            direct_deps = session.run("""
+                MATCH (d:Dependency) WHERE d.isDirectDependency = true RETURN count(d) as cnt
+            """).single()["cnt"]
+
+            transitive_deps = session.run("""
+                MATCH (d:Dependency) WHERE d.isDirectDependency = false RETURN count(d) as cnt
+            """).single()["cnt"]
+
+            deps_with_vuln = session.run("""
+                MATCH (d:Dependency)-[:HAS_VULNERABILITY]->() RETURN count(DISTINCT d) as cnt
+            """).single()["cnt"]
+
+            diagnostics["dependency_analysis"] = {
+                "direct_dependencies": direct_deps,
+                "transitive_dependencies": transitive_deps,
+                "dependencies_with_vulnerabilities": deps_with_vuln
+            }
+
+            # Generate recommendations
+            if diagnostics["relationship_counts"]["DEPENDS_ON"] == 0:
+                diagnostics["recommendations"].append(
+                    "CRITICAL: No DEPENDS_ON relationships found! Transitive dependency tree cannot be built. "
+                    "Re-run import with GraphML files (dependency-graph.graphml) to populate transitive relationships."
+                )
+
+            if diagnostics["node_counts"]["Dependency"] == 0:
+                diagnostics["recommendations"].append(
+                    "No Dependency nodes found. The database may be empty. Run the import process first."
+                )
+
+            if transitive_deps > 0 and diagnostics["relationship_counts"]["DEPENDS_ON"] == 0:
+                diagnostics["recommendations"].append(
+                    "Transitive dependencies exist but no DEPENDS_ON edges. "
+                    "The dependency tree structure is incomplete. GraphML import may have failed."
+                )
+
+            # Sample data for debugging
+            if diagnostics["node_counts"]["Dependency"] > 0:
+                sample_deps = session.run("""
+                    MATCH (d:Dependency)
+                    RETURN d.groupId + ':' + d.artifactId as artifact,
+                           d.isDirectDependency as isDirect,
+                           d.detectedVersion as version
+                    LIMIT 5
+                """).data()
+                diagnostics["sample_dependencies"] = sample_deps
+
+            if diagnostics["relationship_counts"]["DEPENDS_ON"] > 0:
+                sample_edges = session.run("""
+                    MATCH (a:Dependency)-[:DEPENDS_ON]->(b:Dependency)
+                    RETURN a.groupId + ':' + a.artifactId as from_artifact,
+                           b.groupId + ':' + b.artifactId as to_artifact
+                    LIMIT 5
+                """).data()
+                diagnostics["sample_depends_on_edges"] = sample_edges
+
+            return json.dumps(diagnostics, indent=2, default=str)
 
     except Exception as e:
-        error_message = str(e)
-        # Make Neo4j errors more helpful
-        if "SyntaxError" in error_message or "Invalid input" in error_message:
-            error_type = "CYPHER SYNTAX ERROR"
-        elif "Unknown property" in error_message or "not defined" in error_message:
-            error_type = "PROPERTY/LABEL ERROR"
-        elif "authentication" in error_message.lower():
-            error_type = "AUTHENTICATION ERROR"
-        else:
-            error_type = "QUERY ERROR"
-
         return json.dumps({
             "success": False,
-            "error_type": error_type,
-            "error": error_message,
-            "query": query,
-            "message": "⚠️ Query failed! Do NOT make up data. Fix the query and try again."
+            "error": str(e)
         }, indent=2)
     finally:
         if driver:
             driver.close()
 
 
-# For direct testing
-if __name__ == "__main__":
-    print("Testing OWASP Dependency Analysis tools:\n")
-    print("1. Analyzing risk statistics...")
-    result = analyze_risk_statistics()
-    print(f"   Result (truncated): {result[:200]}...\n")
+def get_dependency_tree(artifact_name: str = None, max_depth: int = 5, direction: str = "forward") -> str:
+    """
+    Get the dependency tree for a project, module, or specific artifact.
 
-    print("2. Querying Neo4j (count vulnerabilities):")
-    result = read_neo4j_query("MATCH (v:Vulnerability) RETURN v.severity, count(*) as count ORDER BY count DESC")
-    print(f"   Result: {result}\n")
+    This is the PRIMARY tool for understanding dependency hierarchies and transitive relationships.
 
-    print("✅ Tools tested successfully!")
+    Use this tool when the user asks:
+    - "Show me the dependency tree for myproject" (project-level)
+    - "Show me the dependency tree of jackson-databind" (artifact-level)
+    - "What are the transitive dependencies of log4j?"
+    - "Which libraries depend on log4j?" (use direction="reverse")
+    - "Show all dependency chains"
+    - "What is the dependency hierarchy?"
+
+    Args:
+        artifact_name: Project name, module name, or artifact pattern to filter.
+                       Examples: "myproject", "module1", "jackson-databind", "log4j", "spring"
+                       If None, returns tree for all projects.
+        max_depth: Maximum depth of transitive chain to follow (1-10, default: 5)
+        direction: "forward" = what does X depend on, "reverse" = what depends on X
+
+    Returns:
+        JSON with dependency tree structure
+    """
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+
+    max_depth = max(1, min(10, max_depth))
+
+    driver = None
+    try:
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+        with driver.session() as session:
+            # First, determine what the user is asking for: Project, Module, or Artifact?
+            search_type = None
+
+            if artifact_name:
+                # Check if it's a Project name
+                project_check = session.run("""
+                    MATCH (p:Project) WHERE p.name CONTAINS $name RETURN p.name as name LIMIT 1
+                """, name=artifact_name).single()
+
+                if project_check:
+                    search_type = "project"
+                else:
+                    # Check if it's a Module name
+                    module_check = session.run("""
+                        MATCH (m:Module) WHERE m.name CONTAINS $name OR m.id CONTAINS $name 
+                        RETURN m.id as id LIMIT 1
+                    """, name=artifact_name).single()
+
+                    if module_check:
+                        search_type = "module"
+                    else:
+                        search_type = "artifact"
+
+            # Check DEPENDS_ON relationships
+            depends_on_count = session.run("""
+                MATCH ()-[r:DEPENDS_ON]->() RETURN count(r) AS cnt
+            """).single()["cnt"]
+
+            result_data = {
+                "success": True,
+                "search_term": artifact_name or "all",
+                "search_type": search_type or "all_projects",
+                "direction": direction,
+                "max_depth": max_depth,
+                "total_depends_on_relationships": depends_on_count,
+                "trees": []
+            }
+
+            # PROJECT-LEVEL TREE: Show all modules and their dependencies
+            if search_type == "project" or (artifact_name is None) or (search_type is None and artifact_name):
+                if search_type == "project":
+                    query = """
+                        MATCH (p:Project)-[:HAS_MODULE]->(m:Module)
+                        WHERE p.name CONTAINS $name
+                        WITH p, m
+                        MATCH (m)-[:USES_DEPENDENCY]->(d:Dependency)
+                        WITH p.name as project, m.name as module, d
+                        ORDER BY d.isDirectDependency DESC, d.artifactId
+                        WITH project, module, collect({
+                            artifact: d.groupId + ':' + d.artifactId,
+                            version: d.detectedVersion,
+                            isDirect: d.isDirectDependency,
+                            hasVulnerabilities: EXISTS((d)-[:HAS_VULNERABILITY]->())
+                        }) as dependencies
+                        RETURN project, module, 
+                               size([dep IN dependencies WHERE dep.isDirect = true]) as directCount,
+                               size([dep IN dependencies WHERE dep.isDirect = false]) as transitiveCount,
+                               size([dep IN dependencies WHERE dep.hasVulnerabilities]) as vulnerableCount,
+                               dependencies[0..30] as dependencies
+                        ORDER BY module
+                    """
+                    records = session.run(query, name=artifact_name).data()
+
+                    if records:
+                        result_data["trees"] = records
+                        result_data["summary"] = {
+                            "project": artifact_name,
+                            "total_modules": len(records),
+                            "total_direct_deps": sum(r.get("directCount", 0) for r in records),
+                            "total_transitive_deps": sum(r.get("transitiveCount", 0) for r in records),
+                            "total_vulnerable": sum(r.get("vulnerableCount", 0) for r in records)
+                        }
+                    else:
+                        # Project exists but no data - try broader query
+                        result_data["warning"] = f"Project '{artifact_name}' found but no dependency data. Showing all projects."
+                        search_type = "all_projects"
+
+            # MODULE-LEVEL TREE
+            if search_type == "module":
+                query = """
+                    MATCH (m:Module)-[:USES_DEPENDENCY]->(d:Dependency)
+                    WHERE m.name CONTAINS $name OR m.id CONTAINS $name
+                    WITH m, d
+                    ORDER BY d.isDirectDependency DESC, d.artifactId
+                    OPTIONAL MATCH (d)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                    WITH m.name as module, m.id as moduleId, d, collect(v.name)[0..3] as cves
+                    WITH module, moduleId, collect({
+                        artifact: d.groupId + ':' + d.artifactId,
+                        version: d.detectedVersion,
+                        isDirect: d.isDirectDependency,
+                        cves: cves
+                    }) as dependencies
+                    RETURN module, moduleId,
+                           size([dep IN dependencies WHERE dep.isDirect = true]) as directCount,
+                           size(dependencies) as totalCount,
+                           dependencies
+                """
+                records = session.run(query, name=artifact_name).data()
+                result_data["trees"] = records
+
+            # ARTIFACT-LEVEL TREE (with DEPENDS_ON)
+            if search_type == "artifact" and depends_on_count > 0:
+                if direction == "reverse":
+                    # What depends on this artifact?
+                    query = f"""
+                        MATCH (target:Dependency)
+                        WHERE target.artifactId CONTAINS $name OR target.groupId CONTAINS $name
+                        WITH target
+                        OPTIONAL MATCH path = (parent:Dependency)-[:DEPENDS_ON*1..{max_depth}]->(target)
+                        WITH target, parent, length(path) AS depth,
+                             [n IN nodes(path) | n.groupId + ':' + n.artifactId] AS chain
+                        WHERE parent IS NOT NULL
+                        WITH target, collect(DISTINCT {{
+                            parent: parent.groupId + ':' + parent.artifactId,
+                            version: parent.detectedVersion,
+                            isDirect: parent.isDirectDependency,
+                            depth: depth
+                        }})[0..20] AS dependents
+                        RETURN target.groupId + ':' + target.artifactId AS artifact,
+                               target.detectedVersion AS version,
+                               size(dependents) AS dependentCount,
+                               dependents
+                        ORDER BY dependentCount DESC
+                    """
+                else:
+                    # What does this artifact depend on?
+                    query = f"""
+                        MATCH (root:Dependency)
+                        WHERE root.artifactId CONTAINS $name OR root.groupId CONTAINS $name
+                        WITH root
+                        OPTIONAL MATCH path = (root)-[:DEPENDS_ON*1..{max_depth}]->(child:Dependency)
+                        OPTIONAL MATCH (child)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                        WITH root, child, length(path) AS depth,
+                             [n IN nodes(path) | n.groupId + ':' + n.artifactId + ':' + COALESCE(n.detectedVersion, '?')] AS chain,
+                             collect(DISTINCT v.name) AS cves
+                        WHERE child IS NOT NULL
+                        WITH root, collect(DISTINCT {{
+                            dependency: child.groupId + ':' + child.artifactId,
+                            version: child.detectedVersion,
+                            depth: depth,
+                            chain: chain,
+                            cveCount: size(cves)
+                        }})[0..30] AS transitives
+                        RETURN root.groupId + ':' + root.artifactId AS artifact,
+                               root.detectedVersion AS version,
+                               root.isDirectDependency AS isDirect,
+                               size(transitives) AS transitiveCount,
+                               transitives
+                        ORDER BY transitiveCount DESC
+                    """
+                records = session.run(query, name=artifact_name).data()
+                result_data["trees"] = records
+
+            # FALLBACK: Show all projects if no specific match or no DEPENDS_ON
+            if not result_data["trees"] or search_type == "all_projects":
+                query = """
+                    MATCH (p:Project)-[:HAS_MODULE]->(m:Module)
+                    WITH p, m
+                    OPTIONAL MATCH (m)-[:USES_DEPENDENCY]->(d:Dependency)
+                    WITH p.name as project, m.name as module,
+                         count(DISTINCT d) as depCount,
+                         count(DISTINCT CASE WHEN d.isDirectDependency = true THEN d END) as directCount,
+                         count(DISTINCT CASE WHEN EXISTS((d)-[:HAS_VULNERABILITY]->()) THEN d END) as vulnCount
+                    RETURN project, collect({
+                        module: module,
+                        totalDependencies: depCount,
+                        directDependencies: directCount,
+                        vulnerableDependencies: vulnCount
+                    }) as modules
+                    ORDER BY project
+                """
+                records = session.run(query).data()
+
+                if records:
+                    result_data["trees"] = records
+                    result_data["info"] = "Showing project/module overview. For artifact-level tree, specify an artifact name like 'jackson-databind' or 'log4j'."
+
+            # Add helpful message if no results
+            if not result_data["trees"]:
+                result_data["success"] = False
+                result_data["error"] = f"No data found for '{artifact_name}'"
+                result_data["suggestions"] = [
+                    "Use list_projects() to see available projects",
+                    "Try searching for a specific artifact like 'log4j' or 'jackson'",
+                    "Run diagnose_graph_relationships() to check database status"
+                ]
+
+            return json.dumps(result_data, indent=2, default=str)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e)
+        }, indent=2)
+    finally:
+        if driver:
+            driver.close()
+# End of tools.py - no more code after this

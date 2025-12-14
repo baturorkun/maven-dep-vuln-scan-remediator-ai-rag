@@ -209,3 +209,124 @@ RETURN starter.artifactId AS starter,
 ORDER BY vulnerabilityCount DESC
 ```
 
+### Pattern 6: Transitive Dependency Tree Queries (CRITICAL FOR TREE EXTRACTION)
+
+**User Question:** "Show me the dependency tree of jackson-databind" or "What are the transitive dependencies of X?"
+**Correct Cypher Query:**
+```cypher
+// Get full transitive dependency tree for a specific artifact
+// Uses variable-length path pattern [:DEPENDS_ON*1..5] for depth control
+MATCH path = (root:Dependency)-[:DEPENDS_ON*1..5]->(child:Dependency)
+WHERE root.artifactId CONTAINS 'jackson-databind'
+WITH root, child, length(path) AS depth,
+     [node IN nodes(path) | node.groupId + ':' + node.artifactId + ':' + COALESCE(node.detectedVersion, 'unknown')] AS fullPath
+RETURN root.groupId + ':' + root.artifactId AS rootDependency,
+       child.groupId + ':' + child.artifactId AS transitiveDependency,
+       child.detectedVersion AS version,
+       depth,
+       fullPath
+ORDER BY depth, transitiveDependency
+```
+
+**User Question:** "Show me all direct dependencies and their transitive tree"
+**Correct Cypher Query:**
+```cypher
+// Get dependency tree starting from direct dependencies
+MATCH (direct:Dependency {isDirectDependency: true})
+OPTIONAL MATCH path = (direct)-[:DEPENDS_ON*1..4]->(transitive:Dependency)
+WITH direct, 
+     collect(DISTINCT {
+       artifact: transitive.groupId + ':' + transitive.artifactId,
+       version: transitive.detectedVersion,
+       depth: length(path)
+     }) AS transitives
+RETURN direct.groupId + ':' + direct.artifactId AS directDependency,
+       direct.detectedVersion AS version,
+       size(transitives) AS transitiveCount,
+       transitives[0..10] AS sampleTransitives
+ORDER BY transitiveCount DESC
+```
+
+**User Question:** "Which dependencies depend on log4j?" or "What uses X?" (Reverse tree)
+**Correct Cypher Query:**
+```cypher
+// Find all dependencies that DEPEND ON a specific library (reverse lookup)
+MATCH path = (parent:Dependency)-[:DEPENDS_ON*1..5]->(target:Dependency)
+WHERE target.artifactId CONTAINS 'log4j' OR target.groupId CONTAINS 'log4j'
+WITH parent, target, length(path) AS depth,
+     [node IN nodes(path) | node.groupId + ':' + node.artifactId] AS dependencyChain
+RETURN parent.groupId + ':' + parent.artifactId AS dependsOnTarget,
+       parent.isDirectDependency AS isDirect,
+       target.groupId + ':' + target.artifactId AS targetLibrary,
+       depth,
+       dependencyChain
+ORDER BY depth, dependsOnTarget
+```
+
+**User Question:** "Show full dependency tree with vulnerabilities"
+**Correct Cypher Query:**
+```cypher
+// Get dependency tree with vulnerability information at each level
+MATCH (direct:Dependency {isDirectDependency: true})
+OPTIONAL MATCH path = (direct)-[:DEPENDS_ON*0..4]->(dep:Dependency)
+OPTIONAL MATCH (dep)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+WITH direct, dep, length(path) AS depth, collect(DISTINCT v.name) AS cves, collect(DISTINCT v.severity) AS severities
+WHERE dep IS NOT NULL
+RETURN direct.groupId + ':' + direct.artifactId AS rootDependency,
+       dep.groupId + ':' + dep.artifactId AS dependency,
+       dep.detectedVersion AS version,
+       depth,
+       size(cves) AS cveCount,
+       cves[0..3] AS sampleCVEs,
+       severities
+ORDER BY direct.artifactId, depth
+```
+
+**User Question:** "What is the maximum depth of transitive dependencies?"
+**Correct Cypher Query:**
+```cypher
+// Analyze transitive dependency depth statistics
+MATCH path = (direct:Dependency {isDirectDependency: true})-[:DEPENDS_ON*]->(trans:Dependency)
+WITH direct, max(length(path)) AS maxDepth, count(DISTINCT trans) AS transitiveCount
+RETURN direct.groupId + ':' + direct.artifactId AS directDependency,
+       maxDepth,
+       transitiveCount
+ORDER BY maxDepth DESC, transitiveCount DESC
+LIMIT 20
+```
+
+**User Question:** "List all DEPENDS_ON relationships" or "Show transitive edges"
+**Correct Cypher Query:**
+```cypher
+// Get all DEPENDS_ON relationships (edges)
+MATCH (parent:Dependency)-[:DEPENDS_ON]->(child:Dependency)
+RETURN parent.groupId + ':' + parent.artifactId AS parent,
+       parent.detectedVersion AS parentVersion,
+       child.groupId + ':' + child.artifactId AS child,
+       child.detectedVersion AS childVersion
+ORDER BY parent, child
+LIMIT 100
+```
+
+### Pattern 7: Debugging DEPENDS_ON Relationships
+
+**User Question:** "Are there any DEPENDS_ON relationships?" or "Check transitive data"
+**Correct Cypher Query:**
+```cypher
+// Check if DEPENDS_ON relationships exist and count them
+MATCH ()-[r:DEPENDS_ON]->()
+RETURN count(r) AS totalDependsOnRelationships
+```
+
+**User Question:** "Show sample transitive dependency chains"
+**Correct Cypher Query:**
+```cypher
+// Sample some DEPENDS_ON chains for debugging
+MATCH (a:Dependency)-[r:DEPENDS_ON]->(b:Dependency)
+RETURN a.groupId + ':' + a.artifactId AS from,
+       a.detectedVersion AS fromVersion,
+       b.groupId + ':' + b.artifactId AS to,
+       b.detectedVersion AS toVersion
+LIMIT 20
+```
+
