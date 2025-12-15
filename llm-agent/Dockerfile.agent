@@ -4,10 +4,8 @@ FROM localhost/version-scanner:odc-arm64
 COPY requirements.txt /app/requirements.txt
 RUN pip3 install --break-system-packages -r /app/requirements.txt
 
-
 # Mount point for ODC data (contains H2 database)
 RUN mkdir -p /odc-data
-
 
 # Set environment variables
 ENV PATH="/opt/dependency-check/bin:${PATH}"
