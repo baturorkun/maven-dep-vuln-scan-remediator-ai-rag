@@ -965,6 +965,47 @@ def enrich_cve_data(cve_id: str) -> str:
         cursor.close()
         conn.close()
 
+        # Query Neo4j to get affected packages for this CVE
+        affected_packages = []
+        try:
+            NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
+            NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+            NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+
+            neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+            with neo4j_driver.session() as session:
+                result = session.run("""
+                    MATCH (d:Dependency)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                    WHERE v.name = $cve_id
+                    OPTIONAL MATCH (m:Module)-[:USES_DEPENDENCY]->(d)
+                    OPTIONAL MATCH (p:Project)-[:HAS_MODULE]->(m)
+                    RETURN DISTINCT 
+                        d.groupId as groupId,
+                        d.artifactId as artifactId,
+                        d.detectedVersion as version,
+                        d.isDirectDependency as isDirect,
+                        collect(DISTINCT m.name)[0] as module,
+                        collect(DISTINCT p.name)[0] as project
+                    ORDER BY d.groupId, d.artifactId
+                    LIMIT 20
+                """, cve_id=cve_id)
+
+                for record in result:
+                    pkg = {
+                        "groupId": record["groupId"],
+                        "artifactId": record["artifactId"],
+                        "version": record["version"],
+                        "isDirect": record["isDirect"],
+                        "module": record["module"],
+                        "project": record["project"]
+                    }
+                    affected_packages.append(pkg)
+
+            neo4j_driver.close()
+        except Exception as neo4j_error:
+            # Neo4j query failed, continue without affected packages
+            pass
+
         # Build result - no date columns exist in this H2 database version
         result = {
             "success": True,
@@ -980,6 +1021,8 @@ def enrich_cve_data(cve_id: str) -> str:
             } if v2_base_score else None,
             "cwes": cwes if cwes else [],
             "references": references[:5] if references else [],  # Limit to 5 references
+            "affected_packages": affected_packages,
+            "affected_count": len(affected_packages),
             "note": "Date information not available in offline H2 database"
         }
 

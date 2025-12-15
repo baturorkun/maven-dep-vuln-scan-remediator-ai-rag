@@ -330,8 +330,32 @@ with tab4:
                         st.subheader("References")
                         for ref in data['references']:
                             st.write(f"- {ref}")
+
+                    # Show affected packages from Neo4j
+                    if data.get('affected_packages'):
+                        st.subheader(f"📦 Affected Packages ({data.get('affected_count', 0)} found)")
+
+                        import pandas as pd
+                        packages_df = pd.DataFrame(data['affected_packages'])
+
+                        # Rename columns for display
+                        if not packages_df.empty:
+                            packages_df = packages_df.rename(columns={
+                                'groupId': 'Group ID',
+                                'artifactId': 'Artifact ID',
+                                'version': 'Version',
+                                'isDirect': 'Direct?',
+                                'module': 'Module',
+                                'project': 'Project'
+                            })
+
+                            # Display as table
+                            st.dataframe(packages_df, use_container_width=True, hide_index=True)
+                    elif data.get('affected_count') == 0:
+                        st.info("ℹ️ No affected packages found in your scanned projects.")
                 else:
                     st.error(f"Error: {data.get('error', 'CVE not found')}")
+
 
         else:
             st.warning("Please enter a CVE ID")
