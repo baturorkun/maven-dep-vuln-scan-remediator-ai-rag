@@ -92,7 +92,7 @@ if logo_source:
 
 st.sidebar.markdown(f'<p class="sidebar-title">🤖 {PROJECT_TITLE}</p>', unsafe_allow_html=True)
 st.sidebar.header("Configuration")
-neo4j_uri = st.sidebar.text_input("Neo4j URI", value=os.getenv("NEO4J_URI", "bolt://localhost:7687"))
+neo4j_uri = st.sidebar.text_input("Neo4j URI", value=os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687"))
 neo4j_user = st.sidebar.text_input("Neo4j User", value=os.getenv("NEO4J_USER", "neo4j"))
 neo4j_password = st.sidebar.text_input("Neo4j Password", value=os.getenv("NEO4J_PASSWORD", "password"), type="password")
 

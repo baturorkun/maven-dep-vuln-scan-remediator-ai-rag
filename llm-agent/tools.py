@@ -41,7 +41,7 @@ def read_neo4j_query(cypher_query: str) -> str:
     Returns:
         JSON with query results or error message
     """
-    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
@@ -93,7 +93,7 @@ def list_projects() -> str:
         - Vulnerability count per project
         - Remediation count per project
     """
-    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
@@ -205,7 +205,7 @@ def analyze_risk_statistics() -> str:
 
     This is the PRIMARY tool for getting project and module overview!
     """
-    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
@@ -463,7 +463,7 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
             "error": "Visualization libraries not installed. Run: pip install matplotlib networkx"
         }, indent=2)
 
-    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
@@ -911,7 +911,7 @@ def diagnose_graph_relationships() -> str:
     Returns:
         JSON with diagnostic information about all node types and relationships
     """
-    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
@@ -1033,7 +1033,7 @@ def get_dependency_tree(artifact_name: str = None, max_depth: int = 5, direction
     Returns:
         JSON with dependency tree structure
     """
-    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 
@@ -1275,7 +1275,7 @@ def get_remediation_suggestions(project_name: str = None) -> str:
       ]
     }
     """
-    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
 

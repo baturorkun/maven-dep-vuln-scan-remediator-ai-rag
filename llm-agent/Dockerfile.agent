@@ -1,0 +1,21 @@
+FROM localhost/version-scanner:odc-arm64
+
+# Install python dependencies for the agent
+COPY requirements.txt /app/requirements.txt
+RUN pip3 install --break-system-packages -r /app/requirements.txt
+
+# Copy entrypoint to system location (not /app, so volume mount won't override it)
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Copy agent code
+COPY . /app/
+
+# Set working directory
+WORKDIR /app
+
+# Expose Streamlit port
+EXPOSE 8501
+
+# Run the dashboard via entrypoint.sh (supports .env, proper signal handling)
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
