@@ -8,6 +8,14 @@ RUN pip3 install --break-system-packages -r /app/requirements.txt
 # Mount point for ODC data (contains H2 database)
 RUN mkdir -p /odc-data
 
+
+# Set environment variables
+ENV PATH="/opt/dependency-check/bin:${PATH}"
+ENV DEPENDENCY_CHECK_HOME="/opt/dependency-check"
+ENV DEPENDENCY_CHECK_DATA="/usr/share/dependency-check/data"
+ENV JAVA_HOME="/opt/java/openjdk"
+ENV LD_LIBRARY_PATH="/opt/java/openjdk/lib/server:/opt/java/openjdk/lib:${LD_LIBRARY_PATH}"
+
 # Copy entrypoint to system location (not /app, so volume mount won't override it)
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

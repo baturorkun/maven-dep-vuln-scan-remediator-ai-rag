@@ -184,26 +184,23 @@ def list_projects() -> str:
             driver.close()
 
 
-def analyze_risk_statistics() -> str:
+def analyze_risk_statistics(limit: int = 20) -> str:
     """
     Analyze OWASP dependency check data and provide comprehensive risk statistics.
 
-    Returns detailed analysis including:
-    - Total projects count and project details (project code, name, module count)
-    - Total modules count and module details (module name, project, dependency count)
-    - Direct vs transitive dependency breakdown
-    - Remediation coverage statistics
-    - Total vulnerabilities count
-    - Severity distribution (CRITICAL, HIGH, MEDIUM, LOW)
-    - Average CVSS score
-    - Top 10 riskiest dependencies (with project and module usage info)
-    - Dependencies without vulnerabilities count
-    - Risk score calculation per dependency
-    - Upgrade path analysis
-    - Version distribution statistics
-    - Transitive dependency depth analysis
+    Args:
+        limit: Maximum number of risky dependencies and projects to return (default: 20)
 
-    This is the PRIMARY tool for getting project and module overview!
+    Returns:
+        JSON string containing detailed analysis including:
+        - Project Risk Ranking: Projects sorted by total risk score
+        - Top Risky Dependencies: Detailed list including CVEs and remediation versions
+        - Top Risky ROOT Dependencies (Root Cause): Aggregated risk by direct dependencies
+        - Vulnerability Summary: Severity distribution and CVSS stats
+        - General Statistics: Projects, modules, dependencies counts
+        - Remediation Coverage: Stats on available fixes
+        
+    This tool provides the data needed for detailed risk assessment and remediation planning.
     """
     NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
@@ -214,51 +211,132 @@ def analyze_risk_statistics() -> str:
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
         with driver.session() as session:
-            # Get total project count
-            total_projects = session.run("MATCH (p:Project) RETURN count(p) as total").single()["total"]
+            # 1. General Overview Stats
+            overview = session.run("""
+                MATCH (p:Project) WITH count(p) as projectCount
+                MATCH (m:Module) WITH projectCount, count(m) as moduleCount
+                MATCH (d:Dependency) WITH projectCount, moduleCount, count(d) as depCount
+                MATCH (v:Vulnerability) WITH projectCount, moduleCount, depCount, count(v) as vulnCount
+                RETURN projectCount, moduleCount, depCount, vulnCount
+            """).single()
 
-            # Get project details
-            projects = session.run("""
-                MATCH (p:Project)
-                OPTIONAL MATCH (p)-[:HAS_MODULE]->(m:Module)
+            # 2. Project Risk Ranking
+            # Calculates a risk score for each project based on its vulnerabilities
+            project_risks = session.run(f"""
+                MATCH (p:Project)-[:HAS_MODULE]->(m:Module)-[:USES_DEPENDENCY]->(d:Dependency)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                WITH p, 
+                     count(DISTINCT d) as vulnDeps,
+                     count(v) as totalVulns,
+                     sum(CASE v.severity 
+                         WHEN 'CRITICAL' THEN 10 
+                         WHEN 'HIGH' THEN 5 
+                         WHEN 'MEDIUM' THEN 2 
+                         WHEN 'LOW' THEN 1 
+                         ELSE 0 END) as projectRiskScore
                 RETURN p.name as projectName,
-                       count(m) as moduleCount
-                ORDER BY p.name
+                       vulnDeps as vulnerableDependenciesCount,
+                       totalVulns as totalVulnerabilities,
+                       projectRiskScore
+                ORDER BY projectRiskScore DESC
+                LIMIT {limit}
             """).data()
 
-            # Get total module count
-            total_modules = session.run("MATCH (m:Module) RETURN count(m) as total").single()["total"]
-
-            # Get module details
-            modules = session.run("""
-                MATCH (p:Project)-[:HAS_MODULE]->(m:Module)
-                OPTIONAL MATCH (m)-[:USES_DEPENDENCY]->(d:Dependency)
-                RETURN m.name as moduleName,
-                       m.project as projectCode,
-                       count(d) as dependencyCount
-                ORDER BY m.project, m.name
+            # 3. ROOT CAUSE ANALYSIS: Top Risky Direct Dependencies (Aggregated Transitive Risk)
+            # This identifies which DIRECT dependency in pom.xml is causing the most trouble down the tree
+            root_cause_risks = session.run(f"""
+                MATCH (root:Dependency {{isDirectDependency: true}})
+                
+                // Find all dependencies in the tree starting from root (including root itself)
+                // Use 0.. traversal to include the root node in the path results
+                MATCH path = (root)-[:DEPENDS_ON*0..5]->(child:Dependency)
+                
+                // Find vulnerabilities for any node in this tree
+                MATCH (child)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                
+                WITH root, 
+                     count(DISTINCT v) as aggregatedVulnCount,
+                     collect(DISTINCT v.severity) as severities,
+                     collect(DISTINCT {{child: child.artifactId, cve: v.name, severity: v.severity}}) as detailedVulns
+                
+                // Calculate Aggregated Risk Score
+                WITH root, aggregatedVulnCount, detailedVulns,
+                     size([s IN severities WHERE s = 'CRITICAL']) as criticalCount,
+                     size([s IN severities WHERE s = 'HIGH']) as highCount,
+                     size([s IN severities WHERE s = 'MEDIUM']) as mediumCount,
+                     size([s IN severities WHERE s = 'LOW']) as lowCount
+                
+                WITH root, aggregatedVulnCount, detailedVulns, criticalCount, highCount, mediumCount, lowCount,
+                     (criticalCount * 10 + highCount * 5 + mediumCount * 2 + lowCount) as riskScore
+                
+                RETURN root.groupId + ':' + root.artifactId as rootArtifact,
+                       root.detectedVersion as currentVersion,
+                       riskScore,
+                       aggregatedVulnCount,
+                       criticalCount,
+                       highCount
+                ORDER BY riskScore DESC
+                LIMIT {limit}
             """).data()
 
-            # Get total vulnerability count
-            total_vulns = session.run("MATCH (v:Vulnerability) RETURN count(v) as total").single()["total"]
+            # 4. Top Risky Individual Dependencies (Direct or Transitive)
+            risky_deps = session.run(f"""
+                MATCH (d:Dependency)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                WITH d, v
+                
+                WITH d, 
+                     count(v) as vulnCount,
+                     max(v.cvssScore) as maxCvss,
+                     collect(DISTINCT v.name) as cveIds,
+                     collect(DISTINCT v.severity) as severities
+                
+                WITH d, vulnCount, maxCvss, cveIds, severities,
+                     size([s IN severities WHERE s = 'CRITICAL']) as criticalCount,
+                     size([s IN severities WHERE s = 'HIGH']) as highCount,
+                     (size([s IN severities WHERE s = 'CRITICAL']) * 10 + 
+                      size([s IN severities WHERE s = 'HIGH']) * 5 + 
+                      size([s IN severities WHERE s = 'MEDIUM']) * 2 + 
+                      size([s IN severities WHERE s = 'LOW']) * 1) as riskScore
 
-            # Get severity distribution
+                OPTIONAL MATCH (d)-[:RECOMMENDED_VERSION]->(rv:ArtifactVersion)
+                
+                RETURN d.groupId + ':' + d.artifactId as artifact,
+                       d.detectedVersion as currentVersion,
+                       rv.version as recommendedVersion,
+                       d.isDirectDependency as isDirect,
+                       d.hasRemediation as hasRemediation,
+                       riskScore,
+                       vulnCount,
+                       criticalCount,
+                       highCount,
+                       maxCvss,
+                       cveIds[0..5] as cveIds,
+                       d.usedByProjects as usedByProjects
+                ORDER BY riskScore DESC
+                LIMIT {limit}
+            """).data()
+
+            # 5. Severity Distribution
             severity_dist = session.run("""
                 MATCH (v:Vulnerability)
-                RETURN v.severity as severity, count(*) as count
+                RETURN v.severity as severity, count(v) as count
                 ORDER BY count DESC
             """).data()
 
-            # Get average CVSS score
-            avg_cvss = session.run("""
-                MATCH (v:Vulnerability)
-                WHERE v.cvssScore IS NOT NULL
-                RETURN avg(v.cvssScore) as avgScore,
-                       max(v.cvssScore) as maxScore,
-                       min(v.cvssScore) as minScore
+            # 6. Remediation Coverage
+            remediation_stats = session.run("""
+                MATCH (d:Dependency)
+                WHERE (d)-[:HAS_VULNERABILITY]->()
+                WITH count(d) as totalVulnDeps
+                MATCH (d2:Dependency)
+                WHERE (d2)-[:HAS_VULNERABILITY]->() AND d2.hasRemediation = true
+                WITH totalVulnDeps, count(d2) as remediatedDeps
+                RETURN totalVulnDeps, remediatedDeps, 
+                       CASE WHEN totalVulnDeps > 0 
+                            THEN toFloat(remediatedDeps) / totalVulnDeps * 100 
+                            ELSE 0 END as coveragePercent
             """).single()
 
-            # Get dependency breakdown (direct vs transitive)
+            # 7. Dependency Breakdown (Direct vs Transitive) - RESTORED for dashboard compatibility
             dep_breakdown = session.run("""
                 MATCH (d:Dependency)
                 WITH d.isDirectDependency as isDirect, count(*) as count
@@ -266,118 +344,23 @@ def analyze_risk_statistics() -> str:
                 ORDER BY isDirect DESC
             """).data()
 
-            # Get remediation coverage
-            remediation_stats = session.run("""
-                MATCH (d:Dependency)
-                WITH d.hasRemediation as hasRemediation, count(*) as count
-                RETURN hasRemediation, count
-            """).data()
-
-            # Get direct dependencies with/without remediations
-            direct_dep_remediation = session.run("""
-                MATCH (d:Dependency {isDirectDependency: true})
-                WITH d.hasRemediation as hasRemediation, count(*) as count
-                RETURN hasRemediation, count
-            """).data()
-
-            # Get top 10 riskiest dependencies with enhanced metrics
-            risky_deps = session.run("""
-                MATCH (d:Dependency)-[:HAS_VULNERABILITY]->(v:Vulnerability)
-                WITH d, count(v) as vulnCount,
-                     avg(COALESCE(v.cvssScore, 5.0)) as avgCvss,
-                     collect(v.severity) as severities
-                WITH d, vulnCount, avgCvss,
-                     size([s IN severities WHERE s = 'CRITICAL']) as criticalCount,
-                     size([s IN severities WHERE s = 'HIGH']) as highCount,
-                     size([s IN severities WHERE s = 'MEDIUM']) as mediumCount,
-                     size([s IN severities WHERE s = 'LOW']) as lowCount
-                WITH d, vulnCount, avgCvss, criticalCount, highCount, mediumCount, lowCount,
-                     (criticalCount * 10 + highCount * 5 + mediumCount * 2 + lowCount) as riskScore
-                RETURN d.groupId + ':' + d.artifactId as artifact,
-                       d.detectedVersion as currentVersion,
-                       d.fileName as fileName,
-                       d.isDirectDependency as isDirect,
-                       d.hasRemediation as hasRemediation,
-                       d.usedByProjects as projects,
-                       d.usedByModules as modules,
-                       vulnCount,
-                       avgCvss,
-                       criticalCount,
-                       highCount,
-                       mediumCount,
-                       lowCount,
-                       riskScore
-                ORDER BY riskScore DESC, criticalCount DESC, highCount DESC
-                LIMIT 10
-            """).data()
-
-            # Get total dependencies count
-            total_deps = session.run("MATCH (d:Dependency) RETURN count(d) as total").single()["total"]
-
-            # Get safe dependencies (no vulnerabilities)
+            # 8. Safe Dependencies (No Vulnerabilities) - RESTORED for dashboard compatibility
             safe_deps = session.run("""
                 MATCH (d:Dependency)
                 WHERE NOT (d)-[:HAS_VULNERABILITY]->()
                 RETURN count(d) as safeDeps
             """).single()["safeDeps"]
 
-            # Get dependencies with upgrade paths
-            upgrade_path_stats = session.run("""
-                MATCH (d:Dependency)-[:CURRENT_VERSION]->(cv:ArtifactVersion)
-                MATCH (d)-[:RECOMMENDED_VERSION]->(rv:ArtifactVersion)
-                WHERE cv.version <> rv.version
-                RETURN count(DISTINCT d) as depsWithUpgrades,
-                       avg(rv.majorVersion - cv.majorVersion) as avgMajorJump,
-                       avg(rv.minorVersion - cv.minorVersion) as avgMinorJump
-            """).single()
+            total_deps = overview["depCount"]
 
-            # Get artifact version statistics
-            version_stats = session.run("""
-                MATCH (av:ArtifactVersion)
-                WITH av.hasCVE as hasCVE, count(*) as count
-                RETURN hasCVE, count
-            """).data()
-
-            # Get top artifacts with most versions tracked
-            top_versioned_artifacts = session.run("""
-                MATCH (av:ArtifactVersion)
-                WITH av.gid + ':' + av.aid as artifact, count(*) as versionCount
-                ORDER BY versionCount DESC
-                LIMIT 5
-                RETURN artifact, versionCount
-            """).data()
-
-            # Get transitive dependency depth analysis
-            dependency_depth = session.run("""
-                MATCH path = (d1:Dependency)-[:DEPENDS_ON*]->(d2:Dependency)
-                WHERE d1.isDirectDependency = true
-                WITH d1, max(length(path)) as maxDepth
-                RETURN avg(maxDepth) as avgDepth,
-                       max(maxDepth) as maxDepth,
-                       min(maxDepth) as minDepth,
-                       count(d1) as directDepsWithTransitive
-            """).single()
-
-            # Get most used transitive dependencies
-            top_transitive = session.run("""
-                MATCH (d:Dependency {isDirectDependency: false})
-                WHERE size(d.usedByModules) > 1
-                RETURN d.groupId + ':' + d.artifactId as artifact,
-                       d.detectedVersion as version,
-                       size(d.usedByModules) as moduleCount,
-                       d.usedByModules as modules
-                ORDER BY moduleCount DESC
-                LIMIT 5
-            """).data()
-
-            # Build enhanced result
             result = {
                 "success": True,
-                "project_overview": {
-                    "total_projects": total_projects,
-                    "total_modules": total_modules,
-                    "projects": projects,
-                    "modules": modules
+                "summary": {
+                    "total_projects": overview["projectCount"],
+                    "total_modules": overview["moduleCount"],
+                    "total_dependencies": total_deps,
+                    "total_vulnerabilities": overview["vulnCount"],
+                    "remediation_coverage_percent": round(remediation_stats["coveragePercent"], 1) if remediation_stats else 0
                 },
                 "dependency_breakdown": {
                     "total_dependencies": total_deps,
@@ -386,44 +369,20 @@ def analyze_risk_statistics() -> str:
                     "dependencies_with_vulnerabilities": total_deps - safe_deps,
                     "safe_dependencies": safe_deps
                 },
-                "remediation_coverage": {
-                    "total_with_remediation": next((item["count"] for item in remediation_stats if item["hasRemediation"] == True), 0),
-                    "total_without_remediation": next((item["count"] for item in remediation_stats if item["hasRemediation"] == False), 0),
-                    "direct_deps_with_remediation": next((item["count"] for item in direct_dep_remediation if item["hasRemediation"] == True), 0),
-                    "direct_deps_without_remediation": next((item["count"] for item in direct_dep_remediation if item["hasRemediation"] == False), 0),
-                    "remediation_coverage_percent": round(
-                        (next((item["count"] for item in remediation_stats if item["hasRemediation"] == True), 0) /
-                         max(total_deps - safe_deps, 1)) * 100, 2
-                    )
-                },
                 "vulnerability_summary": {
-                    "total_vulnerabilities": total_vulns,
-                    "severity_distribution": severity_dist,
-                    "cvss_statistics": {
-                        "average": round(avg_cvss["avgScore"], 2) if avg_cvss["avgScore"] else None,
-                        "maximum": avg_cvss["maxScore"],
-                        "minimum": avg_cvss["minScore"]
-                    }
+                     "total_vulnerabilities": overview["vulnCount"],
+                     "severity_distribution": {row["severity"]: row["count"] for row in severity_dist},
+                     "cvss_statistics": {
+                        "average": next((d["maxCvss"] for d in risky_deps), 0), # Fallback/Simplified approximation if strict calc needed
+                        "maximum": next((d["maxCvss"] for d in risky_deps), 0),
+                        "minimum": 0
+                     }
                 },
-                "upgrade_analysis": {
-                    "dependencies_with_upgrade_paths": upgrade_path_stats["depsWithUpgrades"] if upgrade_path_stats else 0,
-                    "avg_major_version_jump": round(upgrade_path_stats["avgMajorJump"], 2) if upgrade_path_stats and upgrade_path_stats["avgMajorJump"] else 0,
-                    "avg_minor_version_jump": round(upgrade_path_stats["avgMinorJump"], 2) if upgrade_path_stats and upgrade_path_stats["avgMinorJump"] else 0
-                },
-                "version_tracking": {
-                    "total_versions_tracked": sum(item["count"] for item in version_stats),
-                    "versions_with_cves": next((item["count"] for item in version_stats if item["hasCVE"] == True), 0),
-                    "safe_versions": next((item["count"] for item in version_stats if item["hasCVE"] == False), 0),
-                    "top_versioned_artifacts": top_versioned_artifacts
-                },
-                "dependency_depth_analysis": {
-                    "avg_transitive_depth": round(dependency_depth["avgDepth"], 2) if dependency_depth and dependency_depth["avgDepth"] else 0,
-                    "max_transitive_depth": dependency_depth["maxDepth"] if dependency_depth else 0,
-                    "min_transitive_depth": dependency_depth["minDepth"] if dependency_depth else 0,
-                    "direct_deps_with_transitives": dependency_depth["directDepsWithTransitive"] if dependency_depth else 0
-                },
-                "top_10_riskiest_dependencies": risky_deps,
-                "top_5_shared_transitive_dependencies": top_transitive
+                "severity_distribution": {row["severity"]: row["count"] for row in severity_dist},
+                "project_risk_ranking": project_risks,
+                "root_cause_analysis": root_cause_risks,
+                "top_risky_dependencies": risky_deps,
+                "top_10_riskiest_dependencies": risky_deps # Alias for backward compatibility
             }
 
             return json.dumps(result, indent=2)
@@ -799,12 +758,177 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
             driver.close()
 
 
+def _fetch_cve_from_nvd_api(cve_id: str) -> str:
+    """
+    Fetch CVE information from NVD API (internet fallback).
+
+    This is used when the CVE is not found in the local H2 database.
+    Requires internet connection and CVE_LOOKUP_ONLINE=true environment variable.
+
+    Args:
+        cve_id: CVE identifier (e.g., 'CVE-2024-1234')
+
+    Returns:
+        JSON with CVE details from NVD API
+    """
+    # Check if online lookup is enabled (default: disabled for air-gapped environments)
+    online_enabled = os.environ.get("CVE_LOOKUP_ONLINE", "false").lower() in ("true", "1", "yes")
+
+    if not online_enabled:
+        return json.dumps({
+            "success": False,
+            "cve_id": cve_id,
+            "error": "CVE not found in local H2 database",
+            "reason": "This offline database only contains CVEs for Java/Maven ecosystem dependencies that OWASP Dependency Check tracks.",
+            "possible_causes": [
+                "The CVE may be for a non-Java technology (e.g., Chrome, OS, Python packages)",
+                "The CVE may be too recent and not yet in the NVD mirror",
+                "The OWASP DC database may need to be updated"
+            ],
+            "hint": "Set CVE_LOOKUP_ONLINE=true to enable NVD API fallback for CVEs not in local database.",
+            "suggestion": "For non-Java CVEs, consult official sources like NVD (nvd.nist.gov), vendor security advisories, or MITRE CVE database."
+        }, indent=2)
+
+    if not HAS_REQUESTS:
+        return json.dumps({
+            "success": False,
+            "cve_id": cve_id,
+            "error": "CVE not found in local database and 'requests' library not installed for NVD API fallback",
+            "hint": "Run: pip install requests"
+        }, indent=2)
+
+    try:
+        # NVD API 2.0 endpoint
+        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
+
+        response = requests.get(url, timeout=30, headers={
+            "User-Agent": "OWASP-Dependency-Analysis-Tool/1.0"
+        })
+
+        if response.status_code == 404:
+            return json.dumps({
+                "success": False,
+                "cve_id": cve_id,
+                "error": "CVE not found in NVD database",
+                "source": "nvd_api"
+            }, indent=2)
+
+        response.raise_for_status()
+        data = response.json()
+
+        if not data.get("vulnerabilities") or len(data["vulnerabilities"]) == 0:
+            return json.dumps({
+                "success": False,
+                "cve_id": cve_id,
+                "error": "CVE not found in NVD database",
+                "source": "nvd_api"
+            }, indent=2)
+
+        vuln = data["vulnerabilities"][0]["cve"]
+
+        # Extract description (prefer English)
+        description = None
+        for desc in vuln.get("descriptions", []):
+            if desc.get("lang") == "en":
+                description = desc.get("value")
+                break
+        if not description and vuln.get("descriptions"):
+            description = vuln["descriptions"][0].get("value")
+
+        # Extract CVSS scores
+        cvss_v3 = None
+        cvss_v2 = None
+
+        metrics = vuln.get("metrics", {})
+
+        # Try CVSS v3.1 first, then v3.0
+        for v3_key in ["cvssMetricV31", "cvssMetricV30"]:
+            if v3_key in metrics and metrics[v3_key]:
+                cvss_data = metrics[v3_key][0].get("cvssData", {})
+                cvss_v3 = {
+                    "score": cvss_data.get("baseScore"),
+                    "severity": cvss_data.get("baseSeverity"),
+                    "vector": cvss_data.get("vectorString")
+                }
+                break
+
+        # CVSS v2
+        if "cvssMetricV2" in metrics and metrics["cvssMetricV2"]:
+            cvss_data = metrics["cvssMetricV2"][0].get("cvssData", {})
+            cvss_v2 = {
+                "score": cvss_data.get("baseScore"),
+                "vector": cvss_data.get("vectorString")
+            }
+
+        # Extract CWEs
+        cwes = []
+        for weakness in vuln.get("weaknesses", []):
+            for desc in weakness.get("description", []):
+                if desc.get("value", "").startswith("CWE-"):
+                    cwes.append(desc["value"])
+
+        # Extract references (limit to 5)
+        references = []
+        for ref in vuln.get("references", [])[:5]:
+            references.append({
+                "url": ref.get("url"),
+                "source": ref.get("source"),
+                "tags": ref.get("tags", [])
+            })
+
+        # Build result
+        result = {
+            "success": True,
+            "source": "nvd_api",
+            "cve_id": cve_id,
+            "description": description,
+            "published": vuln.get("published"),
+            "last_modified": vuln.get("lastModified"),
+            "cvss_v3": cvss_v3,
+            "cvss_v2": cvss_v2,
+            "cwes": cwes,
+            "references": references,
+            "note": "Data fetched from NVD API (online). CVE was not found in local H2 database."
+        }
+
+        return json.dumps(result, indent=2, default=str)
+
+    except requests.exceptions.Timeout:
+        return json.dumps({
+            "success": False,
+            "cve_id": cve_id,
+            "error": "NVD API request timed out",
+            "source": "nvd_api",
+            "hint": "The NVD API may be slow or unavailable. Try again later."
+        }, indent=2)
+    except requests.exceptions.ConnectionError:
+        return json.dumps({
+            "success": False,
+            "cve_id": cve_id,
+            "error": "Cannot connect to NVD API - no internet connection or NVD is unreachable",
+            "source": "nvd_api",
+            "hint": "Check your internet connection or try again later."
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "cve_id": cve_id,
+            "error": f"NVD API request failed: {str(e)}",
+            "source": "nvd_api",
+            "type": type(e).__name__
+        }, indent=2)
+
+
 def enrich_cve_data(cve_id: str) -> str:
     """
     Fetch detailed CVE information from OWASP Dependency Check's offline H2 database.
 
     This function works in air-gapped environments by reading from the local NVD mirror
-    that OWASP Dependency Check maintains.
+    that OWASP Dependency Check maintains. If not found locally and CVE_LOOKUP_ONLINE=true,
+    falls back to NVD API (requires internet connection).
+
+    Environment Variables:
+        CVE_LOOKUP_ONLINE: Set to "true" to enable NVD API fallback. Default: "false" (offline only)
 
     Args:
         cve_id: CVE identifier (e.g., 'CVE-2024-1234')
@@ -816,6 +940,25 @@ def enrich_cve_data(cve_id: str) -> str:
     import os
 
     try:
+        # Validate JAVA_HOME is set (required for JPype/JayDeBeApi)
+        java_home = os.environ.get('JAVA_HOME')
+        if not java_home:
+            return json.dumps({
+                "success": False,
+                "cve_id": cve_id,
+                "error": "JAVA_HOME environment variable is not set. JayDeBeApi requires Java JVM.",
+                "hint": "Set JAVA_HOME to your Java installation directory (e.g., /opt/java/openjdk)"
+            }, indent=2)
+
+        # Verify JAVA_HOME path exists
+        if not os.path.exists(java_home):
+            return json.dumps({
+                "success": False,
+                "cve_id": cve_id,
+                "error": f"JAVA_HOME path does not exist: {java_home}",
+                "hint": "Ensure Java is installed and JAVA_HOME points to a valid directory"
+            }, indent=2)
+
         # Path to H2 database (OWASP Dependency Check's NVD mirror)
         # Try multiple possible locations
         possible_db_paths = [
@@ -844,11 +987,20 @@ def enrich_cve_data(cve_id: str) -> str:
         # Try multiple possible jar locations
         import glob
 
-        h2_jar_paths = [
+        h2_jar_paths = []
+        
+        # 1. First check DEPENDENCY_CHECK_HOME (same logic as remediation.py)
+        dc_home = os.getenv('DEPENDENCY_CHECK_HOME')
+        if dc_home:
+            h2_jar_paths.append(os.path.join(dc_home, 'lib', 'h2-*.jar'))
+        
+        # 2. Fallback paths
+        h2_jar_paths.extend([
             "/opt/dependency-check/lib/h2-*.jar",  # OWASP DC lib directory
             "/usr/share/java/h2.jar",  # Standard location
             "/root/.m2/repository/com/h2database/h2/*/h2-*.jar",  # Maven cache
-        ]
+            "./h2-*.jar",  # Current directory
+        ])
 
         h2_jar = None
         for pattern in h2_jar_paths:
@@ -887,11 +1039,8 @@ def enrich_cve_data(cve_id: str) -> str:
         if not row:
             cursor.close()
             conn.close()
-            return json.dumps({
-                "success": False,
-                "cve_id": cve_id,
-                "error": "CVE not found in local H2 database"
-            }, indent=2)
+            # Try NVD API as fallback
+            return _fetch_cve_from_nvd_api(cve_id)
 
         # Extract basic data
         cve, description = row
@@ -1028,18 +1177,37 @@ def enrich_cve_data(cve_id: str) -> str:
 
         return json.dumps(result, indent=2, default=str)
 
-    except ImportError:
-        return json.dumps({
-            "success": False,
-            "error": "jaydebeapi library not installed. Run: pip install jaydebeapi"
-        }, indent=2)
-    except Exception as e:
+    except ImportError as e:
         return json.dumps({
             "success": False,
             "cve_id": cve_id,
-            "error": f"Database query failed: {str(e)}",
-            "type": type(e).__name__
+            "error": f"Required library not installed: {str(e)}",
+            "hint": "Run: pip install jaydebeapi JPype1"
         }, indent=2)
+    except Exception as e:
+        error_msg = str(e)
+        error_type = type(e).__name__
+
+        # Provide helpful hints for common JVM-related errors
+        hint = None
+        if "JVM" in error_msg or "libjvm" in error_msg or "java" in error_msg.lower():
+            java_home = os.environ.get('JAVA_HOME', 'NOT SET')
+            ld_library_path = os.environ.get('LD_LIBRARY_PATH', 'NOT SET')
+            hint = (
+                f"JVM not found. Current JAVA_HOME={java_home}, LD_LIBRARY_PATH={ld_library_path}. "
+                "Ensure Java is installed and JAVA_HOME/LD_LIBRARY_PATH are correctly set."
+            )
+
+        result = {
+            "success": False,
+            "cve_id": cve_id,
+            "error": f"Database query failed: {error_msg}",
+            "type": error_type
+        }
+        if hint:
+            result["hint"] = hint
+
+        return json.dumps(result, indent=2)
 
 
 

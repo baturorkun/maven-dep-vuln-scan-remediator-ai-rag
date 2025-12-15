@@ -58,9 +58,11 @@ class MCPToolBridge:
 
     async def connect(self):
         """Start MCP server and connect."""
+        # Pass all environment variables to subprocess (especially JAVA_HOME for JayDeBeApi)
         server_params = StdioServerParameters(
             command=sys.executable,  # python path
-            args=[self.server_script]
+            args=[self.server_script],
+            env=os.environ.copy()  # Inherit all env vars including JAVA_HOME, PATH, LD_LIBRARY_PATH
         )
         
         # Start server process

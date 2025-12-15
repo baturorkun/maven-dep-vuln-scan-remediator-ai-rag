@@ -20,6 +20,9 @@ LLM_BASE_URL="${LLM_BASE_URL:-http://host.containers.internal:11434/v1}"
 LLM_MODEL="${LLM_MODEL:-qwen3:8b}"
 LLM_API_KEY="${LLM_API_KEY:-}"
 
+# CVE Lookup Configuration (default: offline only, set to "true" to enable NVD API fallback)
+CVE_LOOKUP_ONLINE="${CVE_LOOKUP_ONLINE:-false}"
+
 # Stop and remove existing container if running
 if podman ps -a --format "{{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
   echo "Stopping and removing existing container: ${CONTAINER_NAME}..."
@@ -48,5 +51,9 @@ podman run --rm \
   -e LLM_BASE_URL="${LLM_BASE_URL}" \
   -e LLM_MODEL="${LLM_MODEL}" \
   -e LLM_API_KEY="${LLM_API_KEY}" \
+  -e CVE_LOOKUP_ONLINE="${CVE_LOOKUP_ONLINE}" \
+  -e JAVA_HOME="/opt/java/openjdk" \
+  -e LD_LIBRARY_PATH="/opt/java/openjdk/lib/server:/opt/java/openjdk/lib" \
+  -e DEPENDENCY_CHECK_HOME="/opt/dependency-check" \
   "${IMAGE_NAME}"
 

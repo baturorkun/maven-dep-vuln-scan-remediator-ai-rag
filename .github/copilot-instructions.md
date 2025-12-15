@@ -59,6 +59,15 @@ python3 script.py
   export NEO4J_PASSWORD=password
   ```
 
+## CVE Lookup Configuration
+- **CVE_LOOKUP_ONLINE**: Controls whether to use NVD API as fallback when CVE is not found in local H2 database
+  - `false` (default): Offline only - returns error if CVE not in local database (for air-gapped environments)
+  - `true`: Falls back to NVD API (https://services.nvd.nist.gov) when CVE not found locally
+  ```bash
+  export CVE_LOOKUP_ONLINE=false  # Default: offline only
+  export CVE_LOOKUP_ONLINE=true   # Enable NVD API fallback
+  ```
+
 ## Neo4j Graph Schema
 ```
 (Project) -[:HAS_MODULE]-> (Module) -[:USES_DEPENDENCY]-> (Dependency)
