@@ -296,11 +296,13 @@ with tab4:
                     with col1:
                         st.subheader("Basic Information")
                         st.write(f"**CVE ID:** {data['cve_id']}")
-                        st.write(f"**Published:** {data['published']}")
-                        st.write(f"**Last Modified:** {data['last_modified']}")
+                        if data.get('source'):
+                            st.info(f"📦 Source: {data['source']}")
+                        if data.get('note'):
+                            st.caption(f"ℹ️ {data['note']}")
 
                         st.subheader("Description")
-                        st.write(data['description'])
+                        st.write(data.get('description', 'No description available'))
 
                     with col2:
                         st.subheader("CVSS Scores")
@@ -330,6 +332,7 @@ with tab4:
                             st.write(f"- {ref}")
                 else:
                     st.error(f"Error: {data.get('error', 'CVE not found')}")
+
         else:
             st.warning("Please enter a CVE ID")
 

@@ -8,6 +8,10 @@ httpx>=0.25.0
 # Neo4j database driver
 neo4j>=5.0.0
 
+# H2 Database connectivity (for offline CVE lookup)
+jaydebeapi>=1.2.3
+JPype1>=1.4.1
+
 # Visualization libraries (for tools)
 matplotlib>=3.7.0
 networkx>=3.1

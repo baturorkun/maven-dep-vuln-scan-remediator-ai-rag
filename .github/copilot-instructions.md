@@ -84,7 +84,11 @@ python3 script.py
 ## Security
 - Assume air-gapped / offline environments
 - Avoid external network calls unless explicitly stated
-- NVD API calls are optional (enrich_cve_data tool)
+- **CVE Lookup**: Uses OWASP Dependency Check's offline H2 database (NVD mirror)
+  - Database location: `version-scanner-odc/odc-data/odc.mv.db`
+  - Database credentials: `sa` / `password`
+  - No internet required for CVE enrichment
+  - H2 JDBC driver used via JayDeBeApi
 
 ## Output Expectations
 - Provide production-ready code

@@ -41,6 +41,7 @@ podman run --rm \
   --name "${CONTAINER_NAME}" \
   -p "${PORT}:8501" \
   -v "$(pwd):/app" \
+  -v "$(pwd)/../version-scanner-odc/odc-data:/odc-data:ro" \
   -e NEO4J_URI="${NEO4J_URI}" \
   -e NEO4J_USER="${NEO4J_USER}" \
   -e NEO4J_PASSWORD="${NEO4J_PASSWORD}" \

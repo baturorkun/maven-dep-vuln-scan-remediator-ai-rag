@@ -801,7 +801,10 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
 
 def enrich_cve_data(cve_id: str) -> str:
     """
-    Fetch detailed CVE information from the National Vulnerability Database (NVD) API.
+    Fetch detailed CVE information from OWASP Dependency Check's offline H2 database.
+
+    This function works in air-gapped environments by reading from the local NVD mirror
+    that OWASP Dependency Check maintains.
 
     Args:
         cve_id: CVE identifier (e.g., 'CVE-2024-1234')
@@ -809,93 +812,192 @@ def enrich_cve_data(cve_id: str) -> str:
     Returns:
         JSON with CVE details including description, CVSS scores, CWE, references, etc.
     """
-    if not HAS_REQUESTS:
-        return json.dumps({
-            "success": False,
-            "error": "requests library not installed. Run: pip install requests"
-        }, indent=2)
+    import jaydebeapi
+    import os
 
     try:
-        # NVD API endpoint
-        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0"
-        params = {"cveId": cve_id}
+        # Path to H2 database (OWASP Dependency Check's NVD mirror)
+        # Try multiple possible locations
+        possible_db_paths = [
+            "/odc-data/odc",  # Inside container
+            "/app/odc-data/odc",  # If mounted
+            "../version-scanner-odc/odc-data/odc",  # Relative path
+            os.path.expanduser("~/odc-data/odc"),  # User home
+        ]
 
-        # Make request
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
+        db_path = None
+        for path in possible_db_paths:
+            if os.path.exists(f"{path}.mv.db"):
+                db_path = path
+                break
 
-        data = response.json()
-
-        # Check if CVE was found
-        if data.get("totalResults", 0) == 0:
+        if not db_path:
             return json.dumps({
                 "success": False,
                 "cve_id": cve_id,
-                "error": "CVE not found in NVD database"
+                "error": "H2 database not found. Ensure OWASP Dependency Check has been run to populate the NVD database.",
+                "hint": "Expected database at: /odc-data/odc.mv.db or ../version-scanner-odc/odc-data/odc.mv.db"
             }, indent=2)
 
-        # Extract CVE details
-        cve = data["vulnerabilities"][0]["cve"]
+        # Connect to H2 database
+        # H2 JDBC driver should be available in the container
+        # Try multiple possible jar locations
+        import glob
 
-        # Get descriptions
-        descriptions = cve.get("descriptions", [])
-        description = next((d["value"] for d in descriptions if d["lang"] == "en"), "No description available")
+        h2_jar_paths = [
+            "/opt/dependency-check/lib/h2-*.jar",  # OWASP DC lib directory
+            "/usr/share/java/h2.jar",  # Standard location
+            "/root/.m2/repository/com/h2database/h2/*/h2-*.jar",  # Maven cache
+        ]
 
-        # Get CVSS scores
-        metrics = cve.get("metrics", {})
-        cvss_v3 = metrics.get("cvssMetricV31", [{}])[0].get("cvssData", {}) if "cvssMetricV31" in metrics else {}
-        cvss_v2 = metrics.get("cvssMetricV2", [{}])[0].get("cvssData", {}) if "cvssMetricV2" in metrics else {}
+        h2_jar = None
+        for pattern in h2_jar_paths:
+            matches = glob.glob(pattern)
+            if matches:
+                h2_jar = matches[0]
+                break
+
+        if not h2_jar:
+            return json.dumps({
+                "success": False,
+                "error": "H2 JDBC driver not found. Please ensure OWASP Dependency Check is installed."
+            }, indent=2)
+
+        conn = jaydebeapi.connect(
+            "org.h2.Driver",
+            f"jdbc:h2:{db_path}",
+            ["sa", "password"],  # OWASP DC H2 database credentials
+            h2_jar
+        )
+
+        cursor = conn.cursor()
+
+        # Query vulnerability table for CVE details
+        # Note: This H2 database version does not store published/modified dates
+        cursor.execute("""
+            SELECT 
+                CVE,
+                DESCRIPTION
+            FROM VULNERABILITY 
+            WHERE CVE = ?
+        """, [cve_id])
+
+        row = cursor.fetchone()
+
+        if not row:
+            cursor.close()
+            conn.close()
+            return json.dumps({
+                "success": False,
+                "cve_id": cve_id,
+                "error": "CVE not found in local H2 database"
+            }, indent=2)
+
+        # Extract basic data
+        cve, description = row
+
+        # Try to get CVSS scores - column names vary by OWASP DC version
+        # We'll try multiple approaches to be compatible
+        v3_base_score = None
+        v3_severity = None
+        v2_base_score = None
+
+        try:
+            # Try modern column names (OWASP DC 8.0+)
+            cursor.execute("""
+                SELECT V3BaseScore, V3BaseSeverity, V2BaseScore
+                FROM VULNERABILITY 
+                WHERE CVE = ?
+            """, [cve_id])
+            score_row = cursor.fetchone()
+            if score_row:
+                v3_base_score, v3_severity, v2_base_score = score_row
+        except:
+            # If that fails, try older column names
+            try:
+                cursor.execute("""
+                    SELECT CVSSV3_BASE_SCORE, CVSSV3_SEVERITY, CVSSV2_BASE_SCORE
+                    FROM VULNERABILITY 
+                    WHERE CVE = ?
+                """, [cve_id])
+                score_row = cursor.fetchone()
+                if score_row:
+                    v3_base_score, v3_severity, v2_base_score = score_row
+            except:
+                # Scores not available in this database version
+                pass
 
         # Get CWE information
-        weaknesses = cve.get("weaknesses", [])
         cwes = []
-        for weakness in weaknesses:
-            for desc in weakness.get("description", []):
-                if desc.get("lang") == "en":
-                    cwes.append(desc.get("value"))
+        try:
+            cursor.execute("""
+                SELECT CWE 
+                FROM CWE_ENTRY 
+                WHERE CVE_ID = (SELECT ID FROM VULNERABILITY WHERE CVE = ?)
+            """, [cve_id])
+            cwes = [row[0] for row in cursor.fetchall() if row[0]]
+        except:
+            # CWE_ENTRY table might not exist or have different structure
+            pass
 
         # Get references
-        references = cve.get("references", [])
-        ref_urls = [ref.get("url") for ref in references[:5]]  # Limit to 5 references
+        references = []
+        try:
+            cursor.execute("""
+                SELECT NAME, URL, SOURCE 
+                FROM REFERENCE 
+                WHERE CVE_ID = (SELECT ID FROM VULNERABILITY WHERE CVE = ?)
+                LIMIT 10
+            """, [cve_id])
 
-        # Published and modified dates
-        published = cve.get("published", "")
-        last_modified = cve.get("lastModified", "")
+            for ref_row in cursor.fetchall():
+                if ref_row[1]:  # URL exists
+                    references.append({
+                        "name": ref_row[0],
+                        "url": ref_row[1],
+                        "source": ref_row[2]
+                    })
+        except:
+            # REFERENCE table might not exist or have different structure
+            pass
 
+
+        cursor.close()
+        conn.close()
+
+        # Build result - no date columns exist in this H2 database version
         result = {
             "success": True,
+            "source": "offline_h2_database",
             "cve_id": cve_id,
             "description": description,
-            "published": published,
-            "last_modified": last_modified,
             "cvss_v3": {
-                "score": cvss_v3.get("baseScore"),
-                "severity": cvss_v3.get("baseSeverity"),
-                "vector": cvss_v3.get("vectorString")
-            } if cvss_v3 else None,
+                "score": float(v3_base_score) if v3_base_score else None,
+                "severity": v3_severity
+            } if v3_base_score else None,
             "cvss_v2": {
-                "score": cvss_v2.get("baseScore"),
-                "severity": cvss_v2.get("baseSeverity"),
-                "vector": cvss_v2.get("vectorString")
-            } if cvss_v2 else None,
-            "cwes": cwes,
-            "references": ref_urls
+                "score": float(v2_base_score) if v2_base_score else None
+            } if v2_base_score else None,
+            "cwes": cwes if cwes else [],
+            "references": references[:5] if references else [],  # Limit to 5 references
+            "note": "Date information not available in offline H2 database"
         }
 
-        return json.dumps(result, indent=2)
+        return json.dumps(result, indent=2, default=str)
 
-    except requests.RequestException as e:
+    except ImportError:
         return json.dumps({
             "success": False,
-            "cve_id": cve_id,
-            "error": f"API request failed: {str(e)}"
+            "error": "jaydebeapi library not installed. Run: pip install jaydebeapi"
         }, indent=2)
     except Exception as e:
         return json.dumps({
             "success": False,
             "cve_id": cve_id,
-            "error": str(e)
+            "error": f"Database query failed: {str(e)}",
+            "type": type(e).__name__
         }, indent=2)
+
 
 
 def diagnose_graph_relationships() -> str:
