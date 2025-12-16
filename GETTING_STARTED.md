@@ -163,7 +163,7 @@ docker run --rm \
 This will:
 - Scan all modules in the java-project
 - Generate dependency-check-report.json files
-- Create dependency-graph.graphml files
+- Create dependency-graph.dot files (includes phantom packages like spring-boot-starter-*)
 - Generate remediation.json with upgrade suggestions
 
 The scan takes a few minutes on first run (downloading vulnerability database).
@@ -178,7 +178,7 @@ target/
 │   ├── dependency-check-report.json  # Main vulnerability report
 │   ├── dependency-check-report.html  # HTML report
 │   └── dependency-check-report.xml   # XML report
-├── dependency-graph.graphml          # Dependency tree
+├── dependency-graph.dot              # Dependency tree (DOT format)
 ├── remediation.json                  # Version upgrade suggestions
 └── transitive/                       # Transitive dependency data
     └── *.json

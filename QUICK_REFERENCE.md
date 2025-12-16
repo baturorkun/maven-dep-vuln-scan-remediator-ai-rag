@@ -262,7 +262,7 @@ python -c "from neo4j import GraphDatabase; print('OK')"
 # ODC Reports (after scan)
 version-scanner-odc/java-project/module1/target/
   ├── dependency-check-report/dependency-check-report.json
-  ├── dependency-graph.graphml
+  ├── dependency-graph.dot
   └── remediation.json
 
 # Configuration

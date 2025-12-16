@@ -328,7 +328,7 @@ docker run --rm \
 
 # This generates:
 # - dependency-check-report.json (per module)
-# - dependency-graph.graphml (dependency tree)
+# - dependency-graph.dot (dependency tree - includes phantom packages)
 # - remediation.json (version upgrade suggestions)
 ```
 

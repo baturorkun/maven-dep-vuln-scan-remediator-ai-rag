@@ -193,9 +193,13 @@ def inject_plugin_to_pom(pom_path: Path, plugin_element: ET.Element) -> bool:
         return False
 
 
-def generate_graphml_for_pom(pom_path: Path) -> bool:
+def generate_dot_for_pom(pom_path: Path) -> bool:
     """
-    Generate GraphML dependency tree for a single POM
+    Generate DOT dependency tree for a single POM
+
+    DOT format captures all dependencies including "phantom" packages like
+    spring-boot-starter-web that don't produce jar files but are declared
+    as direct dependencies in pom.xml.
 
     Args:
         pom_path: Path to pom.xml
@@ -210,56 +214,55 @@ def generate_graphml_for_pom(pom_path: Path) -> bool:
         # Create target directory if it doesn't exist
         target_dir.mkdir(exist_ok=True)
 
-        output_file = target_dir / "dependency-graph.graphml"
+        output_file = target_dir / "dependency-graph.dot"
 
         # Build Maven command
-        # Note: -Dverbose helps include pom-type dependencies like spring-boot-starter-*
+        # DOT format includes phantom/BOM packages that GraphML misses
         cmd = [
             'mvn', '-f', str(pom_path),
             'dependency:tree',
-            '-DoutputType=graphml',
+            '-DoutputType=dot',
             f'-DoutputFile={output_file}',
-            '-DskipTests',
-            '-Dverbose'
+            '-DskipTests'
         ]
 
-        print_info(f"Generating GraphML for {pom_path}")
+        print_info(f"Generating DOT for {pom_path}")
 
         result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode == 0 and output_file.exists():
-            print_success(f"GraphML created: {output_file}")
+            print_success(f"DOT created: {output_file}")
             return True
         else:
-            print_warning(f"Failed to generate GraphML for {pom_path}")
+            print_warning(f"Failed to generate DOT for {pom_path}")
             if result.stderr:
                 print(f"  Error: {result.stderr[:200]}")
             return False
 
     except Exception as e:
-        print_error(f"GraphML generation failed for {pom_path}: {e}")
+        print_error(f"DOT generation failed for {pom_path}: {e}")
         return False
 
 
-def generate_graphml_files(pom_files: List[Path]) -> int:
+def generate_dot_files(pom_files: List[Path]) -> int:
     """
-    Generate GraphML files for multiple POMs
+    Generate DOT dependency tree files for multiple POMs
 
     Args:
         pom_files: List of POM file paths
 
     Returns:
-        Number of successful GraphML generations
+        Number of successful DOT generations
     """
-    print_header("Generating GraphML Dependency Trees")
+    print_header("Generating DOT Dependency Trees")
     print_info(f"Processing {len(pom_files)} POM file(s)")
 
     success_count = 0
     for pom_file in pom_files:
-        if generate_graphml_for_pom(pom_file):
+        if generate_dot_for_pom(pom_file):
             success_count += 1
 
-    print_success(f"Generated {success_count}/{len(pom_files)} GraphML files")
+    print_success(f"Generated {success_count}/{len(pom_files)} DOT files")
     return success_count
 
 
@@ -393,10 +396,7 @@ Examples:
   # Inject custom plugin XML
   %(prog)s --target-dir /path/to/project --inject-plugin --plugin-xml custom.xml
 
-  # Generate GraphML dependency trees
-  %(prog)s --target-dir /path/to/project --generate-graphml
-
-  # Remediation: Basic (only check package itself)
+  # Remediation: Basic (generates DOT + remediation.json)
   %(prog)s --target-dir /path/to/project --remediation
 
   # Remediation: With transitive dependency checking (2 levels deep)
@@ -405,8 +405,8 @@ Examples:
   # Remediation: With full transitive checking (all dependencies, up to 10 levels)
   %(prog)s --target-dir /path/to/project --remediation --transitive
 
-  # Full workflow: inject + graphml + scan
-  %(prog)s --target-dir /app --inject-plugin --generate-graphml
+  # Full workflow: inject plugin + remediation (with DOT)
+  %(prog)s --target-dir /app --inject-plugin --remediation --transitive
         """
     )
 
@@ -430,17 +430,11 @@ Examples:
                              default='owasp.plugin.xml',
                              help='Plugin XML file to inject (default: owasp.plugin.xml)')
 
-    # GraphML generation
-    graph_group = parser.add_argument_group('Dependency Graph Options')
-    graph_group.add_argument('--generate-graphml',
-                            action='store_true',
-                            help='Generate GraphML dependency tree files (target/dependency-graph.graphml)')
-
-    # Remediation options
+    # Remediation options (DOT dependency graph is auto-generated with --remediation)
     remediation_group = parser.add_argument_group('Remediation Options')
     remediation_group.add_argument('--remediation',
                                   action='store_true',
-                                  help='Generate remediation suggestions (target/remediation.json). By default, only checks package itself for vulnerabilities.')
+                                  help='Generate remediation suggestions (target/remediation.json) and DOT dependency tree (target/dependency-graph.dot). DOT format includes phantom packages like spring-boot-starter-*.')
     remediation_group.add_argument('--transitive', nargs='?', const=-1, type=int, default=0,
                                   metavar='DEPTH',
                                   help='(Requires --remediation) Enable transitive dependency checking when finding safe versions. DEPTH: number of dependency levels to check (default: infinite if flag present, 0 if absent). Use --transitive 2 for 2 levels, --transitive for all levels (up to 10).')
@@ -486,27 +480,8 @@ Examples:
 
         print_success(f"Successfully injected plugin into {success_count}/{len(pom_files)} POM files")
 
-    # Generate GraphML files if requested
-    if args.generate_graphml:
-        # Find POMs to process
-        if args.pom:
-            pom_files = [Path(args.pom)]
-        else:
-            target = args.target_dir
-            print_info(f"Searching for pom.xml files in {target}")
-            pom_files = find_all_pom_files(target)
-            print_info(f"Found {len(pom_files)} POM files")
-
-        # Generate GraphML for each POM
-        graphml_success = generate_graphml_files(pom_files)
-
-        if graphml_success == 0:
-            print_warning("No GraphML files were generated")
-
     # Generate remediation report if requested
     if args.remediation:
-        print_header("Generating Remediation Suggestions")
-
         # Find POMs to process
         if args.pom:
             pom_files = [Path(args.pom)]
@@ -515,6 +490,16 @@ Examples:
             print_info(f"Searching for pom.xml files in {target}")
             pom_files = find_all_pom_files(target)
             print_info(f"Found {len(pom_files)} POM files")
+
+        # Always generate DOT files for dependency tree (includes phantom packages)
+        print_header("Generating DOT Dependency Trees")
+        dot_success = generate_dot_files(pom_files)
+        if dot_success == 0:
+            print_warning("No DOT files were generated")
+
+        # Generate remediation suggestions
+        print_header("Generating Remediation Suggestions")
+
 
         # Generate remediation for EACH POM separately
         allow_major_upgrade = os.getenv('ALLOW_MAJOR_UPGRADE', 'false').lower() in ('true', '1', 'yes')
@@ -557,8 +542,8 @@ Examples:
         print_success(f"Total: {total_deps} dependencies processed across {len(pom_files)} POM files")
 
     # Run scan only if at least one action was NOT performed
-    # (i.e., if user didn't specify --inject-plugin, --generate-graphml, or --remediation)
-    should_scan = not (args.inject_plugin or args.generate_graphml or args.remediation)
+    # (i.e., if user didn't specify --inject-plugin or --remediation)
+    should_scan = not (args.inject_plugin or args.remediation)
 
     if should_scan:
         # Run scan

@@ -105,13 +105,15 @@ def main():
                 RETURN count(d) as total,
                        count(CASE WHEN d.isDirectDependency = true THEN 1 END) as direct,
                        count(CASE WHEN d.isDirectDependency = false THEN 1 END) as transitive,
-                       count(CASE WHEN d.isGraphmlOnly = true THEN 1 END) as graphml_only
+                       count(CASE WHEN d.isDotOnly = true THEN 1 END) as dot_only,
+                       count(CASE WHEN d.isPhantomDependency = true THEN 1 END) as phantom
             """).single()
 
             print(f"   Toplam Dependency: {counts['total']}")
             print(f"   Direct: {counts['direct']}")
             print(f"   Transitive: {counts['transitive']}")
-            print(f"   GraphML-only: {counts['graphml_only']}")
+            print(f"   DOT-only: {counts['dot_only']}")
+            print(f"   Phantom (BOM/starter): {counts['phantom']}")
 
     finally:
         driver.close()

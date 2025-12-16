@@ -2,8 +2,12 @@
 """
 OWASP Dependency Check to Neo4j Importer (Advanced)
 
-Imports ODC JSON reports and GraphML dependency trees into Neo4j with hierarchy:
+Imports ODC JSON reports and DOT dependency trees into Neo4j with hierarchy:
 Project -> Module -> Dependency -> Vulnerability -> ArtifactVersion
+
+DOT format is used instead of GraphML because it captures phantom packages
+(like spring-boot-starter-web) that don't produce jar files but are declared
+as direct dependencies in pom.xml.
 
 Graph Schema (Plan1.md Yöntem 2 + Multi-Project Context):
 - (Project)-[:HAS_MODULE]->(Module)
@@ -15,6 +19,7 @@ Graph Schema (Plan1.md Yöntem 2 + Multi-Project Context):
 - (ArtifactVersion)-[:UPGRADES_TO]->(ArtifactVersion)
 
 Features:
+- Phantom package detection (spring-boot-starter-*, BOM dependencies)
 - Direct Dependency -> ArtifactVersion relationships (simple 2-layer model)
 - Version nodes with CVE enrichment (hasCVE, cveCount, highSeverityCVECount)
 - Version ordering properties (majorVersion, minorVersion, patchVersion)
@@ -70,11 +75,11 @@ def print_header(msg: str):
 
 class ModuleData:
     """Data container for a single module"""
-    def __init__(self, module_name: str, odc_json_path: Path, graphml_path: Optional[Path] = None,
+    def __init__(self, module_name: str, odc_json_path: Path, dot_path: Optional[Path] = None,
                  remediation_json_path: Optional[Path] = None, pom_path: Optional[Path] = None):
         self.module_name = module_name
         self.odc_json_path = odc_json_path
-        self.graphml_path = graphml_path
+        self.dot_path = dot_path
         self.remediation_json_path = remediation_json_path
         self.pom_path = pom_path
         self.dependencies = []
@@ -84,7 +89,7 @@ class ModuleData:
 
 def find_odc_reports(target_dir: str) -> List[ModuleData]:
     """
-    Find all ODC JSON reports and corresponding GraphML files
+    Find all ODC JSON reports and corresponding DOT dependency tree files
 
     Args:
         target_dir: Root directory to search
@@ -122,11 +127,12 @@ def find_odc_reports(target_dir: str) -> List[ModuleData]:
             print_warning(f"Skipping parent/aggregator module: {module_name} (has {len(child_targets)} child modules)")
             continue
 
-        # Look for corresponding GraphML file (always in target dir, not in subdirectory)
-        graphml_file = maven_target_dir / 'dependency-graph.graphml'
-        if not graphml_file.exists():
-            graphml_file = None
-            print_warning(f"No GraphML found for module: {module_name}")
+        # Look for corresponding DOT file (always in target dir, not in subdirectory)
+        # DOT format includes phantom packages like spring-boot-starter-web
+        dot_file = maven_target_dir / 'dependency-graph.dot'
+        if not dot_file.exists():
+            dot_file = None
+            print_warning(f"No DOT file found for module: {module_name}")
 
         # Look for remediation.json produced by version-scanner
         remediation_file = maven_target_dir / 'remediation.json'
@@ -142,7 +148,7 @@ def find_odc_reports(target_dir: str) -> List[ModuleData]:
         module_data = ModuleData(
             module_name=module_name,
             odc_json_path=json_file,
-            graphml_path=graphml_file,
+            dot_path=dot_file,
             remediation_json_path=remediation_file,
             pom_path=pom_file
         )
@@ -151,98 +157,78 @@ def find_odc_reports(target_dir: str) -> List[ModuleData]:
     return modules
 
 
-def parse_graphml(graphml_path: Path) -> tuple[Dict[str, Dict], Set[str], List[Dict], Optional[str]]:
+def parse_dot(dot_path: Path) -> tuple[Dict[str, Dict], Set[str], List[Dict], Optional[str]]:
     """
-    Parse GraphML dependency tree and identify direct dependencies and all edges
+    Parse DOT dependency tree and identify direct dependencies and all edges.
+
+    DOT format captures phantom packages like spring-boot-starter-web that
+    GraphML misses because they don't produce jar files.
+
+    DOT format example:
+    digraph "com.example:module1:jar:1.0-SNAPSHOT" {
+        "com.example:module1:jar:1.0-SNAPSHOT" -> "org.springframework.boot:spring-boot-starter-web:jar:3.3.1:compile" ;
+        "org.springframework.boot:spring-boot-starter-web:jar:3.3.1:compile" -> "org.springframework.boot:spring-boot-starter:pom:3.3.1:compile" ;
+    }
 
     Args:
-        graphml_path: Path to GraphML file
+        dot_path: Path to DOT file
 
     Returns:
         Tuple of (dependency_map, direct_dependency_ids, edges_list, root_node_id)
-        - dependency_map: Dictionary mapping dependency IDs to their metadata
-        - direct_dependency_ids: Set of node IDs that are direct dependencies
+        - dependency_map: Dictionary mapping dependency labels to their metadata
+        - direct_dependency_ids: Set of labels that are direct dependencies
         - edges_list: List of all edges with source/target labels
-        - root_node_id: ID of the root node (module itself)
+        - root_node_id: Label of the root node (module itself)
     """
+    import re
+
     dependency_map = {}
     direct_dependency_ids = set()
+    edges_list = []
+    root_node_id = None
 
     try:
-        tree = ET.parse(graphml_path)
-        root = tree.getroot()
+        with open(dot_path, 'r') as f:
+            content = f.read()
 
-        # GraphML namespace
-        ns = {'graphml': 'http://graphml.graphdrawing.org/xmlns',
-              'y': 'http://www.yworks.com/xml/graphml'}
+        # Extract root node from digraph declaration
+        # Format: digraph "groupId:artifactId:type:version" { ... }
+        digraph_match = re.search(r'digraph\s+"([^"]+)"', content)
+        if digraph_match:
+            root_node_id = digraph_match.group(1)
+            # Add root node to dependency map
+            dependency_map[root_node_id] = {'label': root_node_id}
 
-        # Parse nodes (dependencies)
-        for node in root.findall('.//graphml:node', ns):
-            node_id = node.get('id')
-            node_data = {}
+        # Parse edges: "source" -> "target" ;
+        # Pattern matches: "label1" -> "label2" with optional scope info
+        edge_pattern = re.compile(r'"([^"]+)"\s*->\s*"([^"]+)"')
 
-            # Extract node data
-            for data in node.findall('graphml:data', ns):
-                key = data.get('key')
-                value = data.text
-                node_data[key] = value
+        for match in edge_pattern.finditer(content):
+            source_label = match.group(1)
+            target_label = match.group(2)
 
-            # Extract node label from yFiles structure
-            node_label_elem = node.find('.//y:NodeLabel', ns)
-            if node_label_elem is not None and node_label_elem.text:
-                node_data['label'] = node_label_elem.text
+            # Add nodes to dependency map if not exists
+            if source_label not in dependency_map:
+                dependency_map[source_label] = {'label': source_label}
+            if target_label not in dependency_map:
+                dependency_map[target_label] = {'label': target_label}
 
-            dependency_map[node_id] = node_data
+            # Track direct dependencies (edges from root)
+            if source_label == root_node_id:
+                direct_dependency_ids.add(target_label)
 
-        # Find root node and direct dependencies
-        # Root node is typically the first node (module itself)
-        # Direct dependencies are targets of edges originating from root node
+            # Add edge to list
+            edges_list.append({
+                'source_id': source_label,
+                'target_id': target_label,
+                'source_label': source_label,
+                'target_label': target_label
+            })
 
-        # Find all nodes that are targets (they have incoming edges)
-        target_nodes = set()
-        root_node_id = None
-
-        for edge in root.findall('.//graphml:edge', ns):
-            source = edge.get('source')
-            target = edge.get('target')
-            target_nodes.add(target)
-
-        # Root node is the one that's never a target (or the first node)
-        for node_id in dependency_map.keys():
-            if node_id not in target_nodes:
-                root_node_id = node_id
-                break
-
-        # If no root found (shouldn't happen), use first node
-        if not root_node_id and dependency_map:
-            root_node_id = next(iter(dependency_map.keys()))
-
-        # Now find direct dependencies: targets of edges from root
-        if root_node_id:
-            for edge in root.findall('.//graphml:edge', ns):
-                source = edge.get('source')
-                target = edge.get('target')
-                if source == root_node_id:
-                    direct_dependency_ids.add(target)
-
-        # Parse all edges for DEPENDS_ON relationships
-        edges_list = []
-        for edge in root.findall('.//graphml:edge', ns):
-            source_id = edge.get('source')
-            target_id = edge.get('target')
-
-            if source_id and target_id:
-                edges_list.append({
-                    'source_id': source_id,
-                    'target_id': target_id,
-                    'source_label': dependency_map.get(source_id, {}).get('label'),
-                    'target_label': dependency_map.get(target_id, {}).get('label')
-                })
-
-        print_success(f"Parsed GraphML: {len(dependency_map)} nodes, {len(direct_dependency_ids)} direct, {len(edges_list)} edges")
+        print_success(f"Parsed DOT: {len(dependency_map)} nodes, {len(direct_dependency_ids)} direct, {len(edges_list)} edges")
 
     except Exception as e:
-        print_error(f"Failed to parse GraphML {graphml_path}: {e}")
+        print_error(f"Failed to parse DOT {dot_path}: {e}")
         edges_list = []
         root_node_id = None
 
@@ -519,13 +505,13 @@ class Neo4jImporter:
         if not odc_data:
             return
 
-        # Load GraphML if available
-        graphml_data = {}
+        # Load DOT dependency tree if available
+        dot_data = {}
         direct_dep_ids = set()
-        graphml_edges = []
+        dot_edges = []
         root_node_id = None
-        if module.graphml_path:
-            graphml_data, direct_dep_ids, graphml_edges, root_node_id = parse_graphml(module.graphml_path)
+        if module.dot_path:
+            dot_data, direct_dep_ids, dot_edges, root_node_id = parse_dot(module.dot_path)
 
         # Load remediation.json if available for this module
         remediation_map = {}
@@ -548,7 +534,7 @@ class Neo4jImporter:
         print_info(f"  Found {len(dependencies)} dependencies")
 
         for dep in dependencies:
-            self._import_dependency(session, module_id, dep, graphml_data, remediation_map, direct_dep_ids)
+            self._import_dependency(session, module_id, dep, dot_data, remediation_map, direct_dep_ids)
 
         # Build ODC lookup map for GraphML edge matching and phantom detection
         odc_lookup = {}
@@ -580,15 +566,17 @@ class Neo4jImporter:
                             'version': version
                         })
 
-        # Import GraphML edges as DEPENDS_ON relationships
-        if graphml_edges:
-            print_info(f"  Importing GraphML edges as DEPENDS_ON relationships...")
-            # First, ensure all GraphML nodes exist as Dependency nodes (even if not in ODC)
-            self._ensure_graphml_dependencies_exist(session, module_id, graphml_data, root_node_id)
-            self._import_graphml_edges(session, graphml_edges, graphml_data, odc_lookup, root_node_id)
+        # Import DOT edges as DEPENDS_ON relationships
+        if dot_edges:
+            print_info(f"  Importing DOT edges as DEPENDS_ON relationships...")
+            # First, ensure all DOT nodes exist as Dependency nodes (even if not in ODC)
+            # This includes phantom packages like spring-boot-starter-web
+            self._ensure_dot_dependencies_exist(session, module_id, dot_data, direct_dep_ids, root_node_id)
+            self._import_dot_edges(session, dot_edges, dot_data, odc_lookup, root_node_id)
 
-        # Import "phantom" dependencies from POM that don't appear in ODC/GraphML
-        # These are typically BOM/starter packages like spring-boot-starter-web
+        # Note: Phantom dependency import from POM is now handled via DOT file
+        # DOT format includes phantom packages that GraphML missed
+        # We keep POM parsing for backward compatibility and edge cases
         if module.pom_path:
             pom_dependencies = parse_pom_dependencies(module.pom_path)
             # Pass remediation_map so phantom nodes can get remediation/version info if available
@@ -632,17 +620,15 @@ class Neo4jImporter:
                 continue
 
             # This is a phantom dependency - create it without sha256
-            # Use groupId:artifactId:version as unique identifier
+            # IMPORTANT: MERGE on (groupId, artifactId, version) to match with DOT import
+            # DOT import uses same key, so they will share the same node
             phantom_id = f"{gid}:{aid}:{version}" if version else f"{gid}:{aid}:unknown"
 
             session.run("""
-                MERGE (d:Dependency {phantomId: $phantom_id})
-                SET d.groupId = $gid,
-                    d.artifactId = $aid,
-                    d.detectedVersion = $version,
+                MERGE (d:Dependency {groupId: $gid, artifactId: $aid, detectedVersion: $version})
+                SET d.phantomId = COALESCE(d.phantomId, $phantom_id),
                     d.scope = $scope,
                     d.isPhantomDependency = true,
-                    d.isDirectDependency = true,
                     d.hasRemediation = false,
                     d.description = 'POM/BOM/Starter dependency (no jar file)',
                     d.usedByModules = CASE
@@ -661,7 +647,8 @@ class Neo4jImporter:
                 SET r.addedDate = datetime(),
                     r.module = $module_name,
                     r.project = $project_code,
-                    r.fromPom = true
+                    r.fromPom = true,
+                    r.isDirectDependency = true
             """, phantom_id=phantom_id, gid=gid, aid=aid, version=version,
                  scope=scope, module_id=module_id, module_name=module_name, project_code=project_code)
 
@@ -887,9 +874,6 @@ class Neo4jImporter:
             // Set hasRemediation property for easy querying by LLM
             SET d.hasRemediation = ($remediation IS NOT NULL AND $remediation.remediationVersion IS NOT NULL)
 
-            // Set isDirectDependency property (from GraphML analysis)
-            SET d.isDirectDependency = $is_direct
-
             WITH d, $remediation AS remediation, $module_id AS module_id, $module_name AS module_name, $project_code AS project_code
 
             // Direct Dependency -> ArtifactVersion model (Plan1.md Yöntem 2 + multi-project context)
@@ -971,7 +955,8 @@ class Neo4jImporter:
             // Add metadata to relationship for detailed analysis
             SET r.addedDate = datetime(),
                 r.module = $module_name,
-                r.project = $project_code
+                r.project = $project_code,
+                r.isDirectDependency = $is_direct
         """, sha256=sha256, props=props, module_id=module_id,
              module_name=module_name, project_code=project_code, remediation=remediation, is_direct=is_direct)
 
@@ -1023,27 +1008,31 @@ class Neo4jImporter:
                 END
         """, name=vuln_name, props=vuln_props, dep_sha256=dep_sha256, severity=severity)
 
-    def _ensure_graphml_dependencies_exist(self, session, module_id: str, graphml_data: Dict, root_node_id: str = None):
+    def _ensure_dot_dependencies_exist(self, session, module_id: str, dot_data: Dict, direct_dep_ids: Set[str], root_node_id: str = None):
         """
-        Ensure all dependencies from GraphML exist in Neo4j.
+        Ensure all dependencies from DOT file exist in Neo4j.
 
         This is important because ODC may not report all transitive dependencies
-        (e.g., non-vulnerable ones). We need these nodes to exist for DEPENDS_ON
-        relationships to work.
+        (e.g., non-vulnerable ones) or phantom packages (like spring-boot-starter-web).
+        We need these nodes to exist for DEPENDS_ON relationships to work.
+
+        DOT format captures phantom packages that GraphML misses.
 
         Args:
             session: Neo4j session
             module_id: Module ID for context
-            graphml_data: Dictionary of node_id -> node_data from parse_graphml
-            root_node_id: Root node ID to skip (module itself)
+            dot_data: Dictionary of node label -> node_data from parse_dot
+            direct_dep_ids: Set of labels that are direct dependencies (from root node edges)
+            root_node_id: Root node label to skip (module itself)
         """
         created_count = 0
         existing_count = 0
+        phantom_count = 0
         project_code, module_name = module_id.split(':', 1)
 
-        for node_id, node_data in graphml_data.items():
+        for node_label, node_data in dot_data.items():
             # Skip root node (it's the module itself, not a dependency)
-            if node_id == root_node_id:
+            if node_label == root_node_id:
                 continue
 
             label = node_data.get('label')
@@ -1057,34 +1046,65 @@ class Neo4jImporter:
             group_id = coords.get('groupId')
             artifact_id = coords.get('artifactId')
             version = coords.get('version')
+            pkg_type = coords.get('type', 'jar')
 
             if not group_id or not artifact_id:
                 continue
 
-            # Check if dependency already exists
+            # Determine if this is a direct dependency
+            is_direct = node_label in direct_dep_ids
+
+            # Determine if this is a phantom package (pom type = no jar file)
+            is_phantom = pkg_type == 'pom'
+
+            # Check if dependency already exists with EXACT VERSION
+            # Different versions of same artifact must be different nodes!
             existing = session.run("""
                 MATCH (d:Dependency)
-                WHERE d.groupId = $gid AND d.artifactId = $aid
+                WHERE d.groupId = $gid
+                  AND d.artifactId = $aid
+                  AND d.detectedVersion = $version
                 RETURN d.sha256 as sha256
                 LIMIT 1
-            """, gid=group_id, aid=artifact_id).single()
+            """, gid=group_id, aid=artifact_id, version=version).single()
 
             if existing:
                 existing_count += 1
-            else:
-                # Create a "GraphML-only" dependency node
-                # These are transitive deps not in ODC (likely not vulnerable)
-                graphml_id = f"graphml:{group_id}:{artifact_id}:{version or 'unknown'}"
-
+                # Create/update USES_DEPENDENCY relationship with isDirectDependency
+                # IMPORTANT: Match by groupId, artifactId AND version to avoid cross-contamination
                 session.run("""
-                    MERGE (d:Dependency {graphmlId: $graphml_id})
-                    SET d.groupId = $gid,
-                        d.artifactId = $aid,
-                        d.detectedVersion = $version,
-                        d.isGraphmlOnly = true,
-                        d.isDirectDependency = false,
-                        d.hasRemediation = false,
-                        d.description = 'Transitive dependency from GraphML (not in OWASP DC report)',
+                    MATCH (d:Dependency)
+                    WHERE d.groupId = $gid
+                      AND d.artifactId = $aid
+                      AND d.detectedVersion = $version
+                    WITH d
+                    MATCH (m:Module {id: $module_id})
+                    MERGE (m)-[r:USES_DEPENDENCY]->(d)
+                    SET r.isDirectDependency = $is_direct,
+                        r.module = $module_name,
+                        r.project = $project_code
+                """, gid=group_id, aid=artifact_id, version=version, is_direct=is_direct,
+                     module_id=module_id, module_name=module_name, project_code=project_code)
+            else:
+                # Create a DOT-only dependency node
+                # These include phantom packages and transitive deps not in ODC
+                dot_id = f"dot:{group_id}:{artifact_id}:{version or 'unknown'}"
+
+                # IMPORTANT: MERGE on (groupId, artifactId, version) to avoid version conflicts
+                # Different versions of same artifact MUST be different nodes
+                # Example: spring-core:5.2.0 and spring-core:6.1.10 are DIFFERENT dependencies
+                session.run("""
+                    MERGE (d:Dependency {groupId: $gid, artifactId: $aid, detectedVersion: $version})
+                    SET d.packageType = COALESCE(d.packageType, $pkg_type),
+                        d.isDotOnly = COALESCE(d.isDotOnly, true),
+                        d.isPhantomDependency = COALESCE(d.isPhantomDependency, $is_phantom),
+                        d.hasRemediation = COALESCE(d.hasRemediation, false),
+                        d.dotId = COALESCE(d.dotId, $dot_id),
+                        d.description = COALESCE(d.description,
+                            CASE
+                                WHEN $is_phantom THEN 'Phantom/BOM package from DOT (no jar file, direct dependency in pom.xml)'
+                                ELSE 'Transitive dependency from DOT (not in OWASP DC report)'
+                            END),
                         d.usedByModules = CASE
                             WHEN d.usedByModules IS NULL THEN [$module_name]
                             WHEN NOT $module_name IN d.usedByModules THEN d.usedByModules + $module_name
@@ -1097,44 +1117,48 @@ class Neo4jImporter:
                         END
                     WITH d
                     MATCH (m:Module {id: $module_id})
-                    MERGE (m)-[:USES_DEPENDENCY]->(d)
-                """, graphml_id=graphml_id, gid=group_id, aid=artifact_id,
-                     version=version, module_id=module_id, module_name=module_name,
+                    MERGE (m)-[r:USES_DEPENDENCY]->(d)
+                    SET r.isDirectDependency = $is_direct,
+                        r.module = $module_name,
+                        r.project = $project_code
+                """, dot_id=dot_id, gid=group_id, aid=artifact_id,
+                     version=version, pkg_type=pkg_type, is_phantom=is_phantom,
+                     is_direct=is_direct, module_id=module_id, module_name=module_name,
                      project_code=project_code)
 
                 created_count += 1
+                if is_phantom:
+                    phantom_count += 1
 
         if created_count > 0:
-            print_success(f"  Created {created_count} GraphML-only dependency nodes")
+            print_success(f"  Created {created_count} DOT-only dependency nodes ({phantom_count} phantom packages)")
         print_info(f"  Found {existing_count} existing dependencies in Neo4j")
 
-    def _import_graphml_edges(self, session, edges_list: List[Dict], graphml_data: Dict, odc_lookup: Dict, root_node_id: str = None):
+    def _import_dot_edges(self, session, edges_list: List[Dict], dot_data: Dict, odc_lookup: Dict, root_node_id: str = None):
         """
-        Import all GraphML edges as DEPENDS_ON relationships.
+        Import all DOT edges as DEPENDS_ON relationships.
 
-        NEW APPROACH: Instead of SHA256 matching, use groupId:artifactId matching.
-        This is more reliable because GraphML labels contain exact Maven coordinates.
+        Uses groupId:artifactId matching for reliability.
 
         Args:
             session: Neo4j session
-            edges_list: List of edges from parse_graphml
-            graphml_data: Node data from parse_graphml
-            odc_lookup: ODC lookup map (kept for compatibility, not used in new approach)
-            root_node_id: Root node ID to skip (module itself)
+            edges_list: List of edges from parse_dot
+            dot_data: Node data from parse_dot
+            odc_lookup: ODC lookup map (kept for compatibility)
+            root_node_id: Root node label to skip (module itself)
         """
         imported_count = 0
         skipped_root_edges = 0
         not_found_count = 0
 
-        print_info(f"  Processing {len(edges_list)} GraphML edges...")
+        print_info(f"  Processing {len(edges_list)} DOT edges...")
 
         for edge in edges_list:
-            source_id = edge.get('source_id')
             source_label = edge.get('source_label')
             target_label = edge.get('target_label')
 
             # Skip edges from root node (module itself - already handled by USES_DEPENDENCY)
-            if root_node_id and source_id == root_node_id:
+            if root_node_id and source_label == root_node_id:
                 skipped_root_edges += 1
                 continue
 
@@ -1147,7 +1171,6 @@ class Neo4jImporter:
                 continue
 
             # Create DEPENDS_ON relationship using groupId + artifactId matching
-            # This is more reliable than SHA256 matching
             result = session.run("""
                 MATCH (source:Dependency)
                 WHERE source.groupId = $source_gid AND source.artifactId = $source_aid
@@ -1178,13 +1201,13 @@ class Neo4jImporter:
 
     def _parse_maven_label(self, label: str) -> Optional[Dict[str, str]]:
         """
-        Parse Maven coordinate label from GraphML.
+        Parse Maven coordinate label from DOT/GraphML.
 
         Format: "groupId:artifactId:type:version:scope" or "groupId:artifactId:jar:version"
         Example: "com.fasterxml.jackson.core:jackson-databind:jar:2.9.8:compile"
 
         Returns:
-            Dict with groupId, artifactId, version or None if parse fails
+            Dict with groupId, artifactId, type, version or None if parse fails
         """
         if not label:
             return None
@@ -1308,8 +1331,8 @@ Node Properties:
     for module in modules:
         print(f"  - {module.module_name}")
         print(f"    JSON: {module.odc_json_path}")
-        if module.graphml_path:
-            print(f"    GraphML: {module.graphml_path}")
+        if module.dot_path:
+            print(f"    DOT: {module.dot_path}")
 
     # Connect to Neo4j
     print_header("Connecting to Neo4j")

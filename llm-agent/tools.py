@@ -244,30 +244,32 @@ def analyze_risk_statistics(limit: int = 20) -> str:
             # 3. ROOT CAUSE ANALYSIS: Top Risky Direct Dependencies (Aggregated Transitive Risk)
             # This identifies which DIRECT dependency in pom.xml is causing the most trouble down the tree
             root_cause_risks = session.run(f"""
-                MATCH (root:Dependency {{isDirectDependency: true}})
-                
+                // First find direct dependencies via USES_DEPENDENCY relationship
+                MATCH (m:Module)-[r:USES_DEPENDENCY]->(root:Dependency)
+                WHERE r.isDirectDependency = true
+
                 // Find all dependencies in the tree starting from root (including root itself)
                 // Use 0.. traversal to include the root node in the path results
                 MATCH path = (root)-[:DEPENDS_ON*0..5]->(child:Dependency)
-                
+
                 // Find vulnerabilities for any node in this tree
                 MATCH (child)-[:HAS_VULNERABILITY]->(v:Vulnerability)
-                
-                WITH root, 
+
+                WITH root,
                      count(DISTINCT v) as aggregatedVulnCount,
                      collect(DISTINCT v.severity) as severities,
                      collect(DISTINCT {{child: child.artifactId, cve: v.name, severity: v.severity}}) as detailedVulns
-                
+
                 // Calculate Aggregated Risk Score
                 WITH root, aggregatedVulnCount, detailedVulns,
                      size([s IN severities WHERE s = 'CRITICAL']) as criticalCount,
                      size([s IN severities WHERE s = 'HIGH']) as highCount,
                      size([s IN severities WHERE s = 'MEDIUM']) as mediumCount,
                      size([s IN severities WHERE s = 'LOW']) as lowCount
-                
+
                 WITH root, aggregatedVulnCount, detailedVulns, criticalCount, highCount, mediumCount, lowCount,
                      (criticalCount * 10 + highCount * 5 + mediumCount * 2 + lowCount) as riskScore
-                
+
                 RETURN root.groupId + ':' + root.artifactId as rootArtifact,
                        root.detectedVersion as currentVersion,
                        riskScore,
@@ -282,27 +284,32 @@ def analyze_risk_statistics(limit: int = 20) -> str:
             risky_deps = session.run(f"""
                 MATCH (d:Dependency)-[:HAS_VULNERABILITY]->(v:Vulnerability)
                 WITH d, v
-                
-                WITH d, 
+
+                WITH d,
                      count(v) as vulnCount,
                      max(v.cvssScore) as maxCvss,
                      collect(DISTINCT v.name) as cveIds,
                      collect(DISTINCT v.severity) as severities
-                
+
                 WITH d, vulnCount, maxCvss, cveIds, severities,
                      size([s IN severities WHERE s = 'CRITICAL']) as criticalCount,
                      size([s IN severities WHERE s = 'HIGH']) as highCount,
-                     (size([s IN severities WHERE s = 'CRITICAL']) * 10 + 
-                      size([s IN severities WHERE s = 'HIGH']) * 5 + 
-                      size([s IN severities WHERE s = 'MEDIUM']) * 2 + 
+                     (size([s IN severities WHERE s = 'CRITICAL']) * 10 +
+                      size([s IN severities WHERE s = 'HIGH']) * 5 +
+                      size([s IN severities WHERE s = 'MEDIUM']) * 2 +
                       size([s IN severities WHERE s = 'LOW']) * 1) as riskScore
 
                 OPTIONAL MATCH (d)-[:RECOMMENDED_VERSION]->(rv:ArtifactVersion)
-                
+
+                // Check if this dependency is used as direct in ANY module
+                OPTIONAL MATCH (m:Module)-[r:USES_DEPENDENCY]->(d)
+                WITH d, rv, riskScore, vulnCount, criticalCount, highCount, maxCvss, cveIds,
+                     any(rel IN collect(r) WHERE rel.isDirectDependency = true) as isDirect
+
                 RETURN d.groupId + ':' + d.artifactId as artifact,
                        d.detectedVersion as currentVersion,
                        rv.version as recommendedVersion,
-                       d.isDirectDependency as isDirect,
+                       isDirect,
                        d.hasRemediation as hasRemediation,
                        riskScore,
                        vulnCount,
@@ -338,8 +345,8 @@ def analyze_risk_statistics(limit: int = 20) -> str:
 
             # 7. Dependency Breakdown (Direct vs Transitive) - RESTORED for dashboard compatibility
             dep_breakdown = session.run("""
-                MATCH (d:Dependency)
-                WITH d.isDirectDependency as isDirect, count(*) as count
+                MATCH (m:Module)-[r:USES_DEPENDENCY]->(d:Dependency)
+                WITH r.isDirectDependency as isDirect, count(DISTINCT r) as count
                 RETURN isDirect, count
                 ORDER BY isDirect DESC
             """).data()
@@ -486,9 +493,11 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
                     similar_query = """
                         MATCH (d:Dependency)
                         WHERE d.artifactId CONTAINS $search_term OR d.groupId CONTAINS $search_term
+                        OPTIONAL MATCH (m:Module)-[r:USES_DEPENDENCY]->(d)
+                        WITH d, any(rel IN collect(r) WHERE rel.isDirectDependency = true) as isDirect
                         RETURN DISTINCT d.groupId + ':' + d.artifactId as artifact,
-                               d.isDirectDependency as isDirect
-                        ORDER BY d.isDirectDependency DESC, artifact
+                               isDirect
+                        ORDER BY isDirect DESC, artifact
                         LIMIT 10
                     """
                     # Extract keywords from artifact_name (e.g., "spring-boot-starter-web" -> "spring")
@@ -1157,13 +1166,14 @@ def enrich_cve_data(cve_id: str) -> str:
                 result = session.run("""
                     MATCH (d:Dependency)-[:HAS_VULNERABILITY]->(v:Vulnerability)
                     WHERE v.name = $cve_id
-                    OPTIONAL MATCH (m:Module)-[:USES_DEPENDENCY]->(d)
+                    OPTIONAL MATCH (m:Module)-[r:USES_DEPENDENCY]->(d)
                     OPTIONAL MATCH (p:Project)-[:HAS_MODULE]->(m)
-                    RETURN DISTINCT 
+                    WITH d, m, p, any(rel IN collect(r) WHERE rel.isDirectDependency = true) as isDirect
+                    RETURN DISTINCT
                         d.groupId as groupId,
                         d.artifactId as artifactId,
                         d.detectedVersion as version,
-                        d.isDirectDependency as isDirect,
+                        isDirect,
                         collect(DISTINCT m.name)[0] as module,
                         collect(DISTINCT p.name)[0] as project
                     ORDER BY d.groupId, d.artifactId
@@ -1286,11 +1296,15 @@ def diagnose_graph_relationships() -> str:
 
             # Dependency analysis
             direct_deps = session.run("""
-                MATCH (d:Dependency) WHERE d.isDirectDependency = true RETURN count(d) as cnt
+                MATCH (m:Module)-[r:USES_DEPENDENCY]->(d:Dependency)
+                WHERE r.isDirectDependency = true
+                RETURN count(DISTINCT r) as cnt
             """).single()["cnt"]
 
             transitive_deps = session.run("""
-                MATCH (d:Dependency) WHERE d.isDirectDependency = false RETURN count(d) as cnt
+                MATCH (m:Module)-[r:USES_DEPENDENCY]->(d:Dependency)
+                WHERE r.isDirectDependency = false
+                RETURN count(DISTINCT r) as cnt
             """).single()["cnt"]
 
             deps_with_vuln = session.run("""
@@ -1307,7 +1321,7 @@ def diagnose_graph_relationships() -> str:
             if diagnostics["relationship_counts"]["DEPENDS_ON"] == 0:
                 diagnostics["recommendations"].append(
                     "CRITICAL: No DEPENDS_ON relationships found! Transitive dependency tree cannot be built. "
-                    "Re-run import with GraphML files (dependency-graph.graphml) to populate transitive relationships."
+                    "Re-run import with DOT files (dependency-graph.dot) to populate transitive relationships."
                 )
 
             if diagnostics["node_counts"]["Dependency"] == 0:
@@ -1318,16 +1332,17 @@ def diagnose_graph_relationships() -> str:
             if transitive_deps > 0 and diagnostics["relationship_counts"]["DEPENDS_ON"] == 0:
                 diagnostics["recommendations"].append(
                     "Transitive dependencies exist but no DEPENDS_ON edges. "
-                    "The dependency tree structure is incomplete. GraphML import may have failed."
+                    "The dependency tree structure is incomplete. DOT import may have failed."
                 )
 
             # Sample data for debugging
             if diagnostics["node_counts"]["Dependency"] > 0:
                 sample_deps = session.run("""
-                    MATCH (d:Dependency)
+                    MATCH (m:Module)-[r:USES_DEPENDENCY]->(d:Dependency)
                     RETURN d.groupId + ':' + d.artifactId as artifact,
-                           d.isDirectDependency as isDirect,
-                           d.detectedVersion as version
+                           r.isDirectDependency as isDirect,
+                           d.detectedVersion as version,
+                           m.name as module
                     LIMIT 5
                 """).data()
                 diagnostics["sample_dependencies"] = sample_deps
@@ -1443,16 +1458,16 @@ def get_dependency_tree(artifact_name: str = None, max_depth: int = 5, direction
                         MATCH (p:Project)-[:HAS_MODULE]->(m:Module)
                         WHERE p.name CONTAINS $name
                         WITH p, m
-                        MATCH (m)-[:USES_DEPENDENCY]->(d:Dependency)
-                        WITH p.name as project, m.name as module, d
-                        ORDER BY d.isDirectDependency DESC, d.artifactId
+                        MATCH (m)-[r:USES_DEPENDENCY]->(d:Dependency)
+                        WITH p.name as project, m.name as module, d, r
+                        ORDER BY r.isDirectDependency DESC, d.artifactId
                         WITH project, module, collect({
                             artifact: d.groupId + ':' + d.artifactId,
                             version: d.detectedVersion,
-                            isDirect: d.isDirectDependency,
+                            isDirect: r.isDirectDependency,
                             hasVulnerabilities: EXISTS((d)-[:HAS_VULNERABILITY]->())
                         }) as dependencies
-                        RETURN project, module, 
+                        RETURN project, module,
                                size([dep IN dependencies WHERE dep.isDirect = true]) as directCount,
                                size([dep IN dependencies WHERE dep.isDirect = false]) as transitiveCount,
                                size([dep IN dependencies WHERE dep.hasVulnerabilities]) as vulnerableCount,
@@ -1478,16 +1493,16 @@ def get_dependency_tree(artifact_name: str = None, max_depth: int = 5, direction
             # MODULE-LEVEL TREE
             if search_type == "module":
                 query = """
-                    MATCH (m:Module)-[:USES_DEPENDENCY]->(d:Dependency)
+                    MATCH (m:Module)-[r:USES_DEPENDENCY]->(d:Dependency)
                     WHERE m.name CONTAINS $name OR m.id CONTAINS $name
-                    WITH m, d
-                    ORDER BY d.isDirectDependency DESC, d.artifactId
+                    WITH m, d, r
+                    ORDER BY r.isDirectDependency DESC, d.artifactId
                     OPTIONAL MATCH (d)-[:HAS_VULNERABILITY]->(v:Vulnerability)
-                    WITH m.name as module, m.id as moduleId, d, collect(v.name)[0..3] as cves
+                    WITH m.name as module, m.id as moduleId, d, r, collect(v.name)[0..3] as cves
                     WITH module, moduleId, collect({
                         artifact: d.groupId + ':' + d.artifactId,
                         version: d.detectedVersion,
-                        isDirect: d.isDirectDependency,
+                        isDirect: r.isDirectDependency,
                         cves: cves
                     }) as dependencies
                     RETURN module, moduleId,
@@ -1556,10 +1571,10 @@ def get_dependency_tree(artifact_name: str = None, max_depth: int = 5, direction
                 query = """
                     MATCH (p:Project)-[:HAS_MODULE]->(m:Module)
                     WITH p, m
-                    OPTIONAL MATCH (m)-[:USES_DEPENDENCY]->(d:Dependency)
+                    OPTIONAL MATCH (m)-[r:USES_DEPENDENCY]->(d:Dependency)
                     WITH p.name as project, m.name as module,
                          count(DISTINCT d) as depCount,
-                         count(DISTINCT CASE WHEN d.isDirectDependency = true THEN d END) as directCount,
+                         count(DISTINCT CASE WHEN r.isDirectDependency = true THEN r END) as directCount,
                          count(DISTINCT CASE WHEN EXISTS((d)-[:HAS_VULNERABILITY]->()) THEN d END) as vulnCount
                     RETURN project, collect({
                         module: module,
@@ -1867,8 +1882,8 @@ def list_direct_dependencies(project_name: str = None, include_safe: bool = True
                 # Case-insensitive search for project name
                 query = """
                     // Get all direct dependencies for specific project (case-insensitive search)
-                    MATCH (p:Project)-[:HAS_MODULE]->(m:Module)-[:USES_DEPENDENCY]->(d:Dependency)
-                    WHERE toLower(p.name) CONTAINS toLower($project_name) AND d.isDirectDependency = true
+                    MATCH (p:Project)-[:HAS_MODULE]->(m:Module)-[r:USES_DEPENDENCY]->(d:Dependency)
+                    WHERE toLower(p.name) CONTAINS toLower($project_name) AND r.isDirectDependency = true
 
                     // Get vulnerability info
                     OPTIONAL MATCH (d)-[:HAS_VULNERABILITY]->(v:Vulnerability)
@@ -1924,8 +1939,8 @@ def list_direct_dependencies(project_name: str = None, include_safe: bool = True
                 # Only one project - proceed with query
                 query = """
                     // Get all direct dependencies for the single project
-                    MATCH (p:Project)-[:HAS_MODULE]->(m:Module)-[:USES_DEPENDENCY]->(d:Dependency)
-                    WHERE d.isDirectDependency = true
+                    MATCH (p:Project)-[:HAS_MODULE]->(m:Module)-[r:USES_DEPENDENCY]->(d:Dependency)
+                    WHERE r.isDirectDependency = true
 
                     // Get vulnerability info
                     OPTIONAL MATCH (d)-[:HAS_VULNERABILITY]->(v:Vulnerability)
