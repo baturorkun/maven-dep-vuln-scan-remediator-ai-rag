@@ -141,7 +141,21 @@ MATCH (m:Module)-[:USES_DEPENDENCY]->(d:Dependency {isDirectDependency: true})
 RETURN m.name AS module, d.artifactId, d.detectedVersion
 ```
 
-### Pattern 2: Finding Dependencies with a Remediation AND Showing the Recommended Version
+### Pattern 2: Listing Direct Dependencies with Safety Status
+
+**User Question:** "Show me all direct dependencies" or "What are my root dependencies?" or "Show safe versions of direct dependencies"
+
+**Tool to Use:** `list_direct_dependencies(project_name="myproject")`
+
+This tool shows ALL direct dependencies (both safe and vulnerable) with their:
+- Current version
+- Vulnerability count
+- Safety status (SAFE/VULNERABLE)
+- Recommended version (if vulnerable and remediation available)
+
+**NOTE:** This is different from `get_remediation_suggestions()` which only shows vulnerable dependencies with remediations.
+
+### Pattern 3: Finding Dependencies with a Remediation AND Showing the Recommended Version
 
 **User Question:** "Which root dependencies have a remediation, and what is the recommended version?"
 
@@ -153,7 +167,7 @@ MATCH (d:Dependency {isDirectDependency: true, hasRemediation: true})-[:RECOMMEN
 RETURN d.groupId, d.artifactId, d.detectedVersion, rec.version AS remediationVersion
 ```
 
-### Pattern 3: Listing All Remediations
+### Pattern 4: Listing All Remediations
 
 **User Question:** "List our remediations" or "Show me all remediations" or "What remediations are available?"
 
@@ -166,7 +180,7 @@ RETURN d.groupId, d.artifactId, d.detectedVersion AS currentVersion, rec.version
 ORDER BY d.groupId, d.artifactId
 ```
 
-### Pattern 4: Finding Dependencies Without a Remediation
+### Pattern 5: Finding Dependencies Without a Remediation
 
 **User Question:** "Which dependencies have no fix available?"
 **Correct Cypher Query:**
@@ -175,7 +189,7 @@ MATCH (d:Dependency {hasRemediation: false})
 RETURN d.groupId, d.artifactId, d.detectedVersion
 ```
 
-### Pattern 5: Querying Phantom/Starter Dependencies and Their Transitive Dependencies
+### Pattern 6: Querying Phantom/Starter Dependencies and Their Transitive Dependencies
 
 **User Question:** "List sub dependencies of spring-boot-starter-web" or "What are the transitive dependencies of [starter-name]?"
 **Correct Cypher Query:**
@@ -214,7 +228,7 @@ RETURN starter.artifactId AS starter,
 ORDER BY vulnerabilityCount DESC
 ```
 
-### Pattern 6: Transitive Dependency Tree Queries (CRITICAL FOR TREE EXTRACTION)
+### Pattern 7: Transitive Dependency Tree Queries (CRITICAL FOR TREE EXTRACTION)
 
 **User Question:** "Show me the dependency tree of jackson-databind" or "What are the transitive dependencies of X?"
 **Correct Cypher Query:**
@@ -313,7 +327,7 @@ ORDER BY parent, child
 LIMIT 100
 ```
 
-### Pattern 7: Debugging DEPENDS_ON Relationships
+### Pattern 8: Debugging DEPENDS_ON Relationships
 
 **User Question:** "Are there any DEPENDS_ON relationships?" or "Check transitive data"
 **Correct Cypher Query:**

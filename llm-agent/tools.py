@@ -399,22 +399,33 @@ def analyze_risk_statistics(limit: int = 20) -> str:
 
 def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_graph.png", artifact_name: str = None) -> str:
     """
-    Create a visual graph of dependencies and their vulnerabilities.
+    Create a VISUAL GRAPH IMAGE (PNG) of dependencies and their vulnerabilities.
 
-    If artifact_name is provided, creates a transitive dependency tree for that specific artifact.
+    ** USE THIS TOOL when the user asks for: **
+    - "create dependency graph png"
+    - "visualize dependencies"
+    - "show me a picture/image/diagram of dependencies"
+    - "draw the dependency graph"
+    - "create a graph for spring-boot-starter-web"
+    - Any request for visual/graphical representation
+
+    ** DO NOT use get_dependency_tree for visualization requests - it only returns JSON data **
+
+    If artifact_name is provided, creates a transitive dependency tree visualization for that specific artifact.
     Otherwise, shows top vulnerable dependencies.
 
     Args:
         limit: Maximum number of dependencies to include (default: 20)
         output_file: Output filename for the graph image (default: "dependency_graph.png")
-        artifact_name: Optional artifact name to show transitive tree (e.g., "jackson-databind")
+        artifact_name: Optional artifact name to show transitive tree (e.g., "jackson-databind", "spring-boot-starter-web")
 
     Returns:
-        JSON with success status and file path
+        JSON with success status and file path to the generated PNG image
 
     Examples:
-        - visualize_dependency_graph() - Top 20 vulnerable dependencies
-        - visualize_dependency_graph(artifact_name="jackson-databind") - jackson-databind's transitive tree
+        - visualize_dependency_graph() - Top 20 vulnerable dependencies graph
+        - visualize_dependency_graph(artifact_name="jackson-databind") - jackson-databind's transitive tree as PNG
+        - visualize_dependency_graph(artifact_name="spring-boot-starter-web") - spring-boot-starter-web dependency graph
     """
     if not HAS_VISUALIZATION:
         return json.dumps({
@@ -471,9 +482,29 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
                 results = session.run(query, artifact_name=artifact_name).data()
 
                 if not results:
+                    # Search for similar artifacts to suggest
+                    similar_query = """
+                        MATCH (d:Dependency)
+                        WHERE d.artifactId CONTAINS $search_term OR d.groupId CONTAINS $search_term
+                        RETURN DISTINCT d.groupId + ':' + d.artifactId as artifact,
+                               d.isDirectDependency as isDirect
+                        ORDER BY d.isDirectDependency DESC, artifact
+                        LIMIT 10
+                    """
+                    # Extract keywords from artifact_name (e.g., "spring-boot-starter-web" -> "spring")
+                    search_keywords = artifact_name.lower().split('-')
+                    search_term = search_keywords[0] if search_keywords else artifact_name
+
+                    similar_results = session.run(similar_query, search_term=search_term).data()
+
+                    suggestions = [r['artifact'] for r in similar_results]
+
                     return json.dumps({
                         "success": False,
-                        "error": f"Artifact '{artifact_name}' not found or has no transitive dependencies"
+                        "error": f"Artifact '{artifact_name}' not found in database",
+                        "message": f"The artifact '{artifact_name}' does not exist in the database or has no dependency relationships.",
+                        "suggestions": suggestions[:5] if suggestions else [],
+                        "hint": f"Try one of the suggested artifacts above, or use list_projects() to see available dependencies."
                     }, indent=2)
 
                 # Get edges for transitive tree
@@ -1324,17 +1355,27 @@ def diagnose_graph_relationships() -> str:
 
 def get_dependency_tree(artifact_name: str = None, max_depth: int = 5, direction: str = "forward") -> str:
     """
-    Get the dependency tree for a project, module, or specific artifact.
+    Get the dependency tree DATA (JSON format) for a project, module, or specific artifact.
 
-    This is the PRIMARY tool for understanding dependency hierarchies and transitive relationships.
+    ** This tool returns JSON DATA, NOT a visual graph/PNG image **
+    ** For visual graphs/PNG images, use visualize_dependency_graph() instead **
 
-    Use this tool when the user asks:
+    This is the PRIMARY tool for understanding dependency hierarchies and transitive relationships
+    when you need structured data to analyze, not a visual representation.
+
+    Use this tool when the user asks for DATA/TEXT/LIST (not visualization):
     - "Show me the dependency tree for myproject" (project-level)
-    - "Show me the dependency tree of jackson-databind" (artifact-level)
+    - "List the dependency tree of jackson-databind" (artifact-level)
     - "What are the transitive dependencies of log4j?"
     - "Which libraries depend on log4j?" (use direction="reverse")
     - "Show all dependency chains"
     - "What is the dependency hierarchy?"
+
+    DO NOT use this tool when user asks for:
+    - "create dependency graph png"
+    - "visualize dependencies"
+    - "draw/show me a picture/image/diagram"
+    - Use visualize_dependency_graph() for these requests
 
     Args:
         artifact_name: Project name, module name, or artifact pattern to filter.
@@ -1344,7 +1385,7 @@ def get_dependency_tree(artifact_name: str = None, max_depth: int = 5, direction
         direction: "forward" = what does X depend on, "reverse" = what depends on X
 
     Returns:
-        JSON with dependency tree structure
+        JSON with dependency tree structure (NOT a PNG image)
     """
     NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
@@ -1560,6 +1601,20 @@ def get_remediation_suggestions(project_name: str = None) -> str:
     """
     Get remediation version suggestions for dependencies with vulnerabilities.
 
+    ** IMPORTANT: This tool ONLY shows vulnerable dependencies that have remediation versions **
+    ** For all direct dependencies (including safe ones), use list_direct_dependencies() **
+
+    DO NOT use this tool when user asks for:
+    - "Show safe versions of direct dependencies"
+    - "List all direct dependencies"
+    - "Show me my root dependencies"
+    → Use list_direct_dependencies() for these requests
+
+    USE this tool when user asks for:
+    - "Show remediation suggestions"
+    - "Which vulnerable dependencies can be fixed?"
+    - "What upgrades are available for vulnerabilities?"
+
     Returns upgrade recommendations from Neo4j database:
     - Current version
     - Recommended version (fixes vulnerabilities)
@@ -1570,7 +1625,7 @@ def get_remediation_suggestions(project_name: str = None) -> str:
         project_name: Optional project name to filter results (default: all projects)
 
     Returns:
-        JSON with remediation suggestions for each vulnerable dependency
+        JSON with remediation suggestions for ONLY vulnerable dependencies with remediations
 
     Example response:
     {
@@ -1719,6 +1774,275 @@ def get_remediation_suggestions(project_name: str = None) -> str:
             "success": False,
             "error": str(e),
             "message": "Failed to retrieve remediation suggestions from Neo4j"
+        }, indent=2)
+    finally:
+        if driver:
+            driver.close()
+
+
+def list_direct_dependencies(project_name: str = None, include_safe: bool = True) -> str:
+    """
+    List all direct (root/pom.xml) dependencies with their vulnerability status.
+
+    ** CRITICAL: USE THIS TOOL when the user asks about "safe versions" **
+
+    ** USE THIS TOOL when the user asks: **
+    - "Show safe versions of direct dependencies"
+    - "Show safe versions of direct dependencies in myproject"
+    - "Show me direct dependencies"
+    - "List root dependencies"
+    - "List all direct dependencies in myproject"
+    - "What are my pom.xml dependencies?"
+    - "Which direct dependencies are vulnerable?"
+    - "Show me all direct dependencies with their status"
+
+    ** This tool shows ALL direct dependencies (both SAFE and VULNERABLE) **
+
+    This is different from get_remediation_suggestions() which ONLY shows vulnerable dependencies with remediations.
+    If the user wants to see all dependencies including safe ones, use this tool.
+
+    Args:
+        project_name: Optional project name to filter results
+                      - If provided: shows dependencies for that specific project
+                      - If not provided and ONLY ONE project exists: shows dependencies for that project
+                      - If not provided and MULTIPLE projects exist: returns error with project list
+                      Extract from user query: "in myproject" → project_name="myproject"
+        include_safe: Include dependencies with no vulnerabilities (default: True)
+
+    Returns:
+        JSON with all direct dependencies including:
+        - Artifact name
+        - Current version
+        - Vulnerability count
+        - Highest severity
+        - Whether it has remediation available
+        - Recommended version (if available)
+        - Safety status (SAFE/VULNERABLE)
+
+    Example usage:
+        User: "Show safe versions of direct dependencies in myproject"
+        → list_direct_dependencies(project_name="myproject")
+
+        User: "Show safe versions of direct dependencies"
+        → list_direct_dependencies()
+
+    Example response:
+    {
+      "success": true,
+      "project": "java-project",
+      "total_direct_dependencies": 15,
+      "safe_dependencies": 10,
+      "vulnerable_dependencies": 5,
+      "dependencies": [
+        {
+          "artifact": "org.springframework.boot:spring-boot-starter-web",
+          "current_version": "2.5.0",
+          "vulnerability_count": 0,
+          "status": "SAFE",
+          "hasRemediation": false
+        },
+        {
+          "artifact": "org.apache.logging.log4j:log4j-api",
+          "current_version": "2.14.1",
+          "vulnerability_count": 12,
+          "highest_severity": "CRITICAL",
+          "status": "VULNERABLE",
+          "hasRemediation": true,
+          "recommended_version": "2.17.1"
+        }
+      ]
+    }
+    """
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://host.containers.internal:7687")
+    NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+
+    driver = None
+    try:
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+
+        with driver.session() as session:
+            # Build query to get all direct dependencies
+            if project_name:
+                # Case-insensitive search for project name
+                query = """
+                    // Get all direct dependencies for specific project (case-insensitive search)
+                    MATCH (p:Project)-[:HAS_MODULE]->(m:Module)-[:USES_DEPENDENCY]->(d:Dependency)
+                    WHERE toLower(p.name) CONTAINS toLower($project_name) AND d.isDirectDependency = true
+
+                    // Get vulnerability info
+                    OPTIONAL MATCH (d)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+
+                    // Get recommended version if available
+                    OPTIONAL MATCH (d)-[:RECOMMENDED_VERSION]->(rv:ArtifactVersion)
+
+                    WITH d, rv,
+                         count(DISTINCT v) as vuln_count,
+                         collect(DISTINCT v.severity) as severities
+
+                    RETURN DISTINCT
+                        d.groupId + ':' + d.artifactId as artifact,
+                        d.detectedVersion as current_version,
+                        vuln_count,
+                        CASE
+                            WHEN vuln_count = 0 THEN 'SAFE'
+                            ELSE 'VULNERABLE'
+                        END as status,
+                        CASE
+                            WHEN 'CRITICAL' IN severities THEN 'CRITICAL'
+                            WHEN 'HIGH' IN severities THEN 'HIGH'
+                            WHEN 'MEDIUM' IN severities THEN 'MEDIUM'
+                            WHEN 'LOW' IN severities THEN 'LOW'
+                            ELSE null
+                        END as highest_severity,
+                        d.hasRemediation as hasRemediation,
+                        rv.version as recommended_version
+                    ORDER BY vuln_count DESC, highest_severity, artifact
+                """
+                params = {"project_name": project_name}
+            else:
+                # No project specified - check if there's only one project
+                project_count = session.run("MATCH (p:Project) RETURN count(p) as cnt").single()["cnt"]
+
+                if project_count == 0:
+                    return json.dumps({
+                        "success": False,
+                        "error": "No projects found in database",
+                        "message": "The database is empty or no projects have been imported"
+                    }, indent=2)
+                elif project_count > 1:
+                    # Multiple projects exist - return project list and suggest specifying one
+                    project_names = session.run("MATCH (p:Project) RETURN p.name as name ORDER BY name").data()
+                    return json.dumps({
+                        "success": False,
+                        "error": "Multiple projects found - please specify project name",
+                        "message": f"Found {project_count} projects in database. Please specify which project.",
+                        "available_projects": [p["name"] for p in project_names],
+                        "hint": "Use: list_direct_dependencies(project_name='your-project-name')"
+                    }, indent=2)
+
+                # Only one project - proceed with query
+                query = """
+                    // Get all direct dependencies for the single project
+                    MATCH (p:Project)-[:HAS_MODULE]->(m:Module)-[:USES_DEPENDENCY]->(d:Dependency)
+                    WHERE d.isDirectDependency = true
+
+                    // Get vulnerability info
+                    OPTIONAL MATCH (d)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+
+                    // Get recommended version if available
+                    OPTIONAL MATCH (d)-[:RECOMMENDED_VERSION]->(rv:ArtifactVersion)
+
+                    WITH d, rv, p,
+                         count(DISTINCT v) as vuln_count,
+                         collect(DISTINCT v.severity) as severities
+
+                    RETURN DISTINCT
+                        d.groupId + ':' + d.artifactId as artifact,
+                        d.detectedVersion as current_version,
+                        vuln_count,
+                        CASE
+                            WHEN vuln_count = 0 THEN 'SAFE'
+                            ELSE 'VULNERABLE'
+                        END as status,
+                        CASE
+                            WHEN 'CRITICAL' IN severities THEN 'CRITICAL'
+                            WHEN 'HIGH' IN severities THEN 'HIGH'
+                            WHEN 'MEDIUM' IN severities THEN 'MEDIUM'
+                            WHEN 'LOW' IN severities THEN 'LOW'
+                            ELSE null
+                        END as highest_severity,
+                        d.hasRemediation as hasRemediation,
+                        rv.version as recommended_version,
+                        p.name as project_name
+                    ORDER BY vuln_count DESC, highest_severity, artifact
+                """
+                params = {}
+
+            results = session.run(query, **params).data()
+
+            if not results:
+                # If project_name was specified but no results, show available projects
+                if project_name:
+                    available_projects = session.run(
+                        "MATCH (p:Project) RETURN p.name as name ORDER BY name"
+                    ).data()
+                    project_list = [p["name"] for p in available_projects]
+
+                    return json.dumps({
+                        "success": False,
+                        "project": project_name,
+                        "error": "No direct dependencies found for this project",
+                        "message": f"Project '{project_name}' not found or has no direct dependencies.",
+                        "available_projects": project_list,
+                        "hint": f"Did you mean one of these? {', '.join(project_list)}"
+                    }, indent=2)
+                else:
+                    return json.dumps({
+                        "success": False,
+                        "project": "unknown",
+                        "error": "No direct dependencies found",
+                        "message": "Database may be empty or no direct dependencies are defined"
+                    }, indent=2)
+
+            # Filter and format results
+            dependencies = []
+            safe_count = 0
+            vulnerable_count = 0
+            detected_project_name = None
+
+            for record in results:
+                vuln_count = record["vuln_count"]
+                is_safe = vuln_count == 0
+
+                # Get project name from results if not specified
+                if not project_name and "project_name" in record and not detected_project_name:
+                    detected_project_name = record["project_name"]
+
+                # Skip safe dependencies if include_safe=False
+                if not include_safe and is_safe:
+                    continue
+
+                if is_safe:
+                    safe_count += 1
+                else:
+                    vulnerable_count += 1
+
+                dep_info = {
+                    "artifact": record["artifact"],
+                    "current_version": record["current_version"],
+                    "vulnerability_count": vuln_count,
+                    "status": record["status"]
+                }
+
+                # Add vulnerability-specific fields
+                if not is_safe:
+                    dep_info["highest_severity"] = record["highest_severity"]
+                    dep_info["hasRemediation"] = record["hasRemediation"]
+                    if record["recommended_version"]:
+                        dep_info["recommended_version"] = record["recommended_version"]
+                else:
+                    dep_info["hasRemediation"] = False
+
+                dependencies.append(dep_info)
+
+            # Determine project name for response
+            response_project_name = project_name or detected_project_name or "unknown project"
+
+            return json.dumps({
+                "success": True,
+                "project": response_project_name,
+                "total_direct_dependencies": len(dependencies),
+                "safe_dependencies": safe_count,
+                "vulnerable_dependencies": vulnerable_count,
+                "dependencies": dependencies
+            }, indent=2)
+
+    except Exception as e:
+        return json.dumps({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to retrieve direct dependencies from Neo4j"
         }, indent=2)
     finally:
         if driver:

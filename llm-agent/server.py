@@ -7,7 +7,8 @@ from tools import (
     list_projects,
     get_dependency_tree,
     diagnose_graph_relationships,
-    get_remediation_suggestions
+    get_remediation_suggestions,
+    list_direct_dependencies
 )
 
 # Create MCP Server
@@ -21,7 +22,8 @@ mcp.tool()(visualize_dependency_graph)
 mcp.tool()(enrich_cve_data)
 mcp.tool()(get_dependency_tree)
 mcp.tool()(diagnose_graph_relationships)
-mcp.tool()(get_remediation_suggestions)  # NEW: Remediation suggestions tool
+mcp.tool()(get_remediation_suggestions)
+mcp.tool()(list_direct_dependencies)  # NEW: List direct dependencies with safety status
 
 if __name__ == "__main__":
     print("Starting MCP Server...")

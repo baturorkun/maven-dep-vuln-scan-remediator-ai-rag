@@ -1,4 +1,5 @@
-#!/usr/bin/envveri bash
+#!/usr/bin/env bash
+set -x
 
 # Run data ingestion in container
 podman run --rm \
