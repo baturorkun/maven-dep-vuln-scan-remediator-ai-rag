@@ -337,10 +337,21 @@ def analyze_risk_statistics(limit: int = 20) -> str:
                 MATCH (d2:Dependency)
                 WHERE (d2)-[:HAS_VULNERABILITY]->() AND d2.hasRemediation = true
                 WITH totalVulnDeps, count(d2) as remediatedDeps
-                RETURN totalVulnDeps, remediatedDeps, 
-                       CASE WHEN totalVulnDeps > 0 
-                            THEN toFloat(remediatedDeps) / totalVulnDeps * 100 
+                RETURN totalVulnDeps, remediatedDeps,
+                       CASE WHEN totalVulnDeps > 0
+                            THEN toFloat(remediatedDeps) / totalVulnDeps * 100
                             ELSE 0 END as coveragePercent
+            """).single()
+
+            # 6b. CVSS Statistics - Calculate real average, max, min from all vulnerabilities
+            cvss_stats = session.run("""
+                MATCH (v:Vulnerability)
+                WHERE v.cvssScore IS NOT NULL
+                WITH v.cvssScore as score
+                RETURN avg(score) as avgCvss,
+                       max(score) as maxCvss,
+                       min(score) as minCvss,
+                       count(score) as scoreCount
             """).single()
 
             # 7. Dependency Breakdown (Direct vs Transitive) - RESTORED for dashboard compatibility
@@ -380,9 +391,10 @@ def analyze_risk_statistics(limit: int = 20) -> str:
                      "total_vulnerabilities": overview["vulnCount"],
                      "severity_distribution": {row["severity"]: row["count"] for row in severity_dist},
                      "cvss_statistics": {
-                        "average": next((d["maxCvss"] for d in risky_deps), 0), # Fallback/Simplified approximation if strict calc needed
-                        "maximum": next((d["maxCvss"] for d in risky_deps), 0),
-                        "minimum": 0
+                        "average": round(cvss_stats["avgCvss"], 2) if cvss_stats and cvss_stats["avgCvss"] else 0,
+                        "maximum": round(cvss_stats["maxCvss"], 2) if cvss_stats and cvss_stats["maxCvss"] else 0,
+                        "minimum": round(cvss_stats["minCvss"], 2) if cvss_stats and cvss_stats["minCvss"] else 0,
+                        "total_scored_vulnerabilities": cvss_stats["scoreCount"] if cvss_stats else 0
                      }
                 },
                 "severity_distribution": {row["severity"]: row["count"] for row in severity_dist},
@@ -451,20 +463,78 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
         with driver.session() as session:
             # Check if artifact_name is provided - create transitive tree
             if artifact_name:
+                # First, try to find the exact artifact with preference for exact matches
+                # Priority: 1) exact artifactId match, 2) exact groupId:artifactId match, 3) partial matches
+                find_artifact_query = """
+                    MATCH (d:Dependency)
+                    WHERE d.artifactId CONTAINS $artifact_name OR d.groupId CONTAINS $artifact_name
+                    WITH d,
+                         CASE
+                             WHEN d.artifactId = $artifact_name THEN 1  // Exact artifactId match
+                             WHEN d.groupId + ':' + d.artifactId = $artifact_name THEN 2  // Exact full name match
+                             WHEN d.artifactId CONTAINS $artifact_name THEN 3  // Partial artifactId match
+                             ELSE 4  // Partial groupId match
+                         END as matchPriority
+                    RETURN d.groupId + ':' + d.artifactId as fullArtifact,
+                           d.artifactId as artifactId,
+                           d.groupId as groupId,
+                           d.detectedVersion as version,
+                           matchPriority
+                    ORDER BY matchPriority, fullArtifact
+                """
+                artifact_matches = session.run(find_artifact_query, artifact_name=artifact_name).data()
+
+                if not artifact_matches:
+                    # Search for similar artifacts to suggest
+                    similar_query = """
+                        MATCH (d:Dependency)
+                        WHERE d.artifactId CONTAINS $search_term OR d.groupId CONTAINS $search_term
+                        OPTIONAL MATCH (m:Module)-[r:USES_DEPENDENCY]->(d)
+                        WITH d, any(rel IN collect(r) WHERE rel.isDirectDependency = true) as isDirect
+                        RETURN DISTINCT d.groupId + ':' + d.artifactId as artifact,
+                               isDirect
+                        ORDER BY isDirect DESC, artifact
+                        LIMIT 10
+                    """
+                    # Extract keywords from artifact_name (e.g., "spring-boot-starter-web" -> "spring")
+                    search_keywords = artifact_name.lower().split('-')
+                    search_term = search_keywords[0] if search_keywords else artifact_name
+
+                    similar_results = session.run(similar_query, search_term=search_term).data()
+
+                    suggestions = [r['artifact'] for r in similar_results]
+
+                    return json.dumps({
+                        "success": False,
+                        "error": f"Artifact '{artifact_name}' not found in database",
+                        "message": f"The artifact '{artifact_name}' does not exist in the database or has no dependency relationships.",
+                        "suggestions": suggestions[:5] if suggestions else [],
+                        "hint": f"Try one of the suggested artifacts above, or use list_projects() to see available dependencies."
+                    }, indent=2)
+
+                # Get the best match (first one after sorting by priority)
+                matched_artifact = artifact_matches[0]
+                actual_artifact_name = matched_artifact['fullArtifact']
+
+                # If multiple matches found, log them for debugging
+                if len(artifact_matches) > 1:
+                    print(f"⚠️ Multiple matches found for '{artifact_name}', using: {actual_artifact_name}")
+                    print(f"   Other matches: {[m['fullArtifact'] for m in artifact_matches[1:6]]}")
+
                 # Get transitive dependency tree with DEPENDS_ON relationships AND CVE info
+                # Use the exact groupId and artifactId from the matched artifact
                 query = f"""
                     MATCH (root:Dependency)
-                    WHERE root.artifactId CONTAINS $artifact_name OR root.groupId CONTAINS $artifact_name
-                    WITH root LIMIT 1
+                    WHERE root.groupId = $groupId AND root.artifactId = $artifactId
                     OPTIONAL MATCH path = (root)-[:DEPENDS_ON*1..5]->(child:Dependency)
                     WITH root, path, child
                     OPTIONAL MATCH (child)-[:HAS_VULNERABILITY]->(v:Vulnerability)
-                    WITH root, 
+                    WITH root,
                          CASE WHEN child IS NULL THEN [root] ELSE nodes(path) END as path_nodes,
                          child,
                          collect(DISTINCT {{name: v.name, severity: v.severity}}) as vulns
                     UNWIND path_nodes as node
-                    WITH DISTINCT node, 
+                    WITH DISTINCT node,
                          CASE WHEN node = child THEN vulns ELSE [] END as node_vulns
                     // Get CVE info for each node
                     OPTIONAL MATCH (node)-[:HAS_VULNERABILITY]->(cve:Vulnerability)
@@ -477,7 +547,7 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
                            version,
                            size(cve_list) as vuln_count,
                            cve_list[0..3] as sample_cves,
-                           CASE 
+                           CASE
                                WHEN 'CRITICAL' IN severity_list THEN 'CRITICAL'
                                WHEN 'HIGH' IN severity_list THEN 'HIGH'
                                WHEN 'MEDIUM' IN severity_list THEN 'MEDIUM'
@@ -486,7 +556,9 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
                            END as top_severity
                     LIMIT {limit * 2}
                 """
-                results = session.run(query, artifact_name=artifact_name).data()
+                results = session.run(query,
+                                     groupId=matched_artifact['groupId'],
+                                     artifactId=matched_artifact['artifactId']).data()
 
                 if not results:
                     # Search for similar artifacts to suggest
@@ -516,21 +588,22 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
                         "hint": f"Try one of the suggested artifacts above, or use list_projects() to see available dependencies."
                     }, indent=2)
 
-                # Get edges for transitive tree
+                # Get edges for transitive tree using the exact matched artifact
                 edges_query = f"""
                     MATCH (root:Dependency)
-                    WHERE root.artifactId CONTAINS $artifact_name OR root.groupId CONTAINS $artifact_name
-                    WITH root LIMIT 1
+                    WHERE root.groupId = $groupId AND root.artifactId = $artifactId
                     MATCH path = (root)-[:DEPENDS_ON*1..5]->(child:Dependency)
                     WITH relationships(path) as rels
                     UNWIND rels as rel
                     WITH startNode(rel) as source, endNode(rel) as target
-                    RETURN DISTINCT 
+                    RETURN DISTINCT
                            source.groupId + ':' + source.artifactId as source_artifact,
                            target.groupId + ':' + target.artifactId as target_artifact
                     LIMIT {limit * 5}
                 """
-                edges_results = session.run(edges_query, artifact_name=artifact_name).data()
+                edges_results = session.run(edges_query,
+                                           groupId=matched_artifact['groupId'],
+                                           artifactId=matched_artifact['artifactId']).data()
 
                 # Create directed graph for transitive tree
                 G = nx.DiGraph()
@@ -657,8 +730,8 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
                                  title_fontsize=16)
                 legend.get_title().set_color('black')
 
-                # Title - black text on white background
-                ax.set_title(f'Dependency Graph: {artifact_name}',
+                # Title - black text on white background - use actual found artifact name
+                ax.set_title(f'Dependency Graph: {actual_artifact_name}',
                            fontsize=24, fontweight='bold', color='black', pad=30)
 
                 ax.axis('off')
@@ -670,10 +743,11 @@ def visualize_dependency_graph(limit: int = 20, output_file: str = "dependency_g
                 return json.dumps({
                     "success": True,
                     "output_file": output_file,
-                    "artifact": artifact_name,
+                    "artifact": actual_artifact_name,  # Return the actual matched artifact, not the input
+                    "requested_artifact": artifact_name,  # Keep the original request for reference
                     "dependencies_count": len(G.nodes()),
                     "relationships_count": len(G.edges()),
-                    "message": f"Transitive tree for {artifact_name} saved to {output_file}"
+                    "message": f"Dependency graph for '{actual_artifact_name}' (requested: '{artifact_name}') saved to {output_file}"
                 }, indent=2)
 
             # Original vulnerability-based graph (when no artifact_name)
