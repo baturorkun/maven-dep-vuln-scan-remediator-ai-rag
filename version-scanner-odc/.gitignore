@@ -3,3 +3,6 @@ odc-data/
 target/
 java-project/*/target/
 .m2
+apollo/
+joern/**
+*.png

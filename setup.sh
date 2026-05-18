@@ -25,28 +25,33 @@ if ! command -v python3 &> /dev/null; then
 fi
 echo -e "${GREEN}✓ Python 3 found: $(python3 --version)${NC}"
 
-# Check if Docker is installed
-if ! command -v docker &> /dev/null; then
-    echo -e "${YELLOW}⚠ Docker is not installed. You'll need it to run the OWASP scanner.${NC}"
-else
+# Check if Podman is installed (preferred), fall back to Docker
+if command -v podman &> /dev/null; then
+    CONTAINER_CMD="podman"
+    echo -e "${GREEN}✓ Podman found: $(podman --version)${NC}"
+elif command -v docker &> /dev/null; then
+    CONTAINER_CMD="docker"
     echo -e "${GREEN}✓ Docker found: $(docker --version)${NC}"
-fi
-
-# Create .env file if it doesn't exist
-if [ ! -f .env ]; then
-    echo ""
-    echo "Creating .env file from .env.example..."
-    cp .env.example .env
-    echo -e "${GREEN}✓ Created .env file${NC}"
-    echo -e "${YELLOW}⚠ Please edit .env and configure your Neo4j and LLM settings${NC}"
 else
-    echo -e "${GREEN}✓ .env file already exists${NC}"
+    CONTAINER_CMD=""
+    echo -e "${YELLOW}⚠ Neither Podman nor Docker is installed. You'll need one to run the OWASP scanner.${NC}"
 fi
 
-# Install rag_graphdb dependencies
+# Create llm-agent/.env file if it doesn't exist
+if [ ! -f llm-agent/.env ]; then
+    echo ""
+    echo "Creating llm-agent/.env file from llm-agent/.env.example..."
+    cp llm-agent/.env.example llm-agent/.env
+    echo -e "${GREEN}✓ Created llm-agent/.env file${NC}"
+    echo -e "${YELLOW}⚠ Please edit llm-agent/.env and configure your Neo4j and LLM settings${NC}"
+else
+    echo -e "${GREEN}✓ llm-agent/.env file already exists${NC}"
+fi
+
+# Install data-ingestion dependencies
 echo ""
-echo "Installing rag_graphdb dependencies..."
-cd rag_graphdb
+echo "Installing data-ingestion dependencies..."
+cd data-ingestion
 if [ ! -d "venv" ]; then
     echo "Creating virtual environment..."
     python3 -m venv venv
@@ -56,12 +61,12 @@ pip install --upgrade pip
 pip install -r requirements.txt
 deactivate
 cd ..
-echo -e "${GREEN}✓ rag_graphdb dependencies installed${NC}"
+echo -e "${GREEN}✓ data-ingestion dependencies installed${NC}"
 
-# Install mcp_agent dependencies
+# Install llm-agent dependencies
 echo ""
-echo "Installing mcp_agent dependencies..."
-cd mcp_agent
+echo "Installing llm-agent dependencies..."
+cd llm-agent
 if [ ! -d "venv" ]; then
     echo "Creating virtual environment..."
     python3 -m venv venv
@@ -71,10 +76,10 @@ pip install --upgrade pip
 pip install -r requirements.txt
 deactivate
 cd ..
-echo -e "${GREEN}✓ mcp_agent dependencies installed${NC}"
+echo -e "${GREEN}✓ llm-agent dependencies installed${NC}"
 
-# Initialize OWASP Dependency Check database (if Docker is available)
-if command -v docker &> /dev/null; then
+# Initialize OWASP Dependency Check database (if container runtime is available)
+if [[ -n "$CONTAINER_CMD" ]]; then
     echo ""
     read -p "Do you want to initialize the OWASP Dependency Check database? (y/n) " -n 1 -r
     echo
@@ -106,25 +111,27 @@ echo "Checking Neo4j connection..."
 read -p "Is Neo4j running? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    cd rag_graphdb
+    cd data-ingestion
     source venv/bin/activate
 
-    # Source .env if it exists
-    if [ -f ../.env ]; then
-        export $(cat ../.env | grep -v '^#' | xargs)
+    # Source llm-agent/.env if it exists
+    if [ -f ../llm-agent/.env ]; then
+        set -a
+        source ../llm-agent/.env
+        set +a
     fi
 
-    if python verify_neo4j.py 2>/dev/null; then
+    if python3 verify_neo4j.py 2>/dev/null; then
         echo -e "${GREEN}✓ Neo4j connection successful${NC}"
     else
         echo -e "${RED}✗ Failed to connect to Neo4j${NC}"
-        echo -e "${YELLOW}  Please check your Neo4j settings in .env${NC}"
+        echo -e "${YELLOW}  Please check your Neo4j settings in llm-agent/.env${NC}"
     fi
     deactivate
     cd ..
 else
     echo -e "${YELLOW}⚠ Please start Neo4j before using the system${NC}"
-    echo "  You can use Docker: docker run -d --name neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password neo4j:latest"
+    echo "  podman run -d --name neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password neo4j:5-community"
 fi
 
 echo ""
@@ -133,23 +140,15 @@ echo "Setup Complete!"
 echo "=========================================="
 echo ""
 echo "Next steps:"
-echo "1. Edit .env and configure your settings"
-echo "2. Start Neo4j if not already running"
+echo "1. Edit llm-agent/.env and configure your settings"
+echo "2. Start Neo4j if not already running:"
+echo "   podman run -d --name neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password neo4j:5-community"
 echo "3. Run a scan:"
-echo "   cd version-scanner-odc"
-echo "   docker run --rm -v \$(pwd):/app version-scanner-odc:odc-arm64 --target-dir /app/java-project --remediation --transitive"
+echo "   cd version-scanner-odc && ./run.sh"
 echo "4. Import data to Neo4j:"
-echo "   cd rag_graphdb"
-echo "   source venv/bin/activate"
-echo "   python import_odc_to_neo4j.py --target-dir ../version-scanner-odc/java-project --project MY_PROJECT"
-echo "5. Test tools:"
-echo "   python test_tools.py"
-echo "6. Run the agent:"
-echo "   cd ../mcp_agent"
-echo "   source venv/bin/activate"
-echo "   python agent.py"
-echo "7. Or run the dashboard:"
-echo "   streamlit run dashboard.py"
+echo "   cd data-ingestion && ./run.sh"
+echo "5. Run the dashboard:"
+echo "   cd llm-agent && ./run.sh"
 echo ""
 echo -e "${GREEN}Enjoy using Dependency Remediate AI RAG!${NC}"
 

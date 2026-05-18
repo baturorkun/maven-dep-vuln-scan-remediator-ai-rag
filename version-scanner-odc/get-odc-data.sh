@@ -3,7 +3,7 @@
 # Download the OWASP Dependency-Check database
 # Creates a database compatible with v12.1.0
 
-if [ $NVD_API_KEY == "" ];
+if [ $NVD_API_KEY == "" ]; then
     echo "❌ ERROR: NVD_API_KEY is not set!"
     exit
 fi
