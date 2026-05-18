@@ -53,7 +53,7 @@ docker run --rm \
 ### Neo4j Operations
 
 ```bash
-cd rag_graphdb
+cd data-ingestion
 source venv/bin/activate
 
 # Set environment variables
